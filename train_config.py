@@ -63,6 +63,22 @@ PULL_OUT_SPEED = 8
 VICTORY_LAP_SPEED = 7
 
 # -----------------------------
+# Hardware pin assignments
+# -----------------------------
+# DCC signal output (pigpio, hardware-timed)
+DCC_GPIO_PIN = 18
+
+# Solenoid switch pins (BCM numbering, per PCB schematic).
+# THROWN fires to diverge; CLOSED fires to close/straight.
+# Adjust CLOSED pins if your PCB differs.
+SWITCH_PINS = {
+    "LOOP": {"THROWN": 17, "CLOSED": 24},
+    "S1":   {"THROWN": 27, "CLOSED": 25},
+    "S2":   {"THROWN": 22, "CLOSED": 12},
+    "S3":   {"THROWN": 23, "CLOSED": 16},
+}
+
+# -----------------------------
 # GUI
 # -----------------------------
 WINDOW_TITLE = "Automated Train Sorter"

@@ -1,8 +1,8 @@
 # TrainIO.py
 
 import time
+import train_config
 from train_config import (
-    MOCK_MODE,
     SWITCH_NAMES,
     LEFT,
     RIGHT,
@@ -13,7 +13,23 @@ from train_config import (
     LOOP_TO_VICTORY,
     BRANCH,
     STRAIGHT,
+    SWITCH_PINS,
+    DCC_GPIO_PIN,
 )
+
+# Optional hardware libraries — imported at module level so the rest of the
+# file works on non-Pi systems (MOCK_MODE) without crashing on import.
+try:
+    import pigpio as _pigpio
+    _PIGPIO_AVAILABLE = True
+except ImportError:
+    _PIGPIO_AVAILABLE = False
+
+try:
+    import RPi.GPIO as _GPIO
+    _GPIO_AVAILABLE = True
+except ImportError:
+    _GPIO_AVAILABLE = False
 
 
 class TrainIO:
@@ -31,9 +47,37 @@ class TrainIO:
         self.switch_positions = {name: LEFT for name in SWITCH_NAMES}
         self.crossing_active = False
         self.coupler_state = "IDLE"
+        self._pi = None          # pigpio.pi() instance, created on first real use
+        self._gpio_ready = False  # True once RPi.GPIO pins are configured
 
     def log(self, msg: str):
         self.logger(msg)
+
+    # -----------------------------------------
+    # Lazy hardware initialisation
+    # -----------------------------------------
+    def _ensure_gpio(self):
+        """Set up RPi.GPIO for solenoid switch pins on first real use."""
+        if self._gpio_ready or not _GPIO_AVAILABLE:
+            return
+        _GPIO.setmode(_GPIO.BCM)
+        for pins in SWITCH_PINS.values():
+            _GPIO.setup(pins["THROWN"], _GPIO.OUT, initial=_GPIO.LOW)
+            _GPIO.setup(pins["CLOSED"], _GPIO.OUT, initial=_GPIO.LOW)
+        self._gpio_ready = True
+
+    def _ensure_pigpio(self):
+        """Connect to the pigpio daemon and configure the DCC output pin."""
+        if self._pi is not None and self._pi.connected:
+            return
+        if not _PIGPIO_AVAILABLE:
+            return
+        self._pi = _pigpio.pi()
+        if self._pi.connected:
+            self._pi.set_mode(DCC_GPIO_PIN, _pigpio.OUTPUT)
+        else:
+            self.log("[WARN] pigpio daemon not reachable — DCC disabled")
+            self._pi = None
 
     # -----------------------------------------
     # Switch control
@@ -53,14 +97,21 @@ class TrainIO:
 
         self.switch_positions[switch_name] = position
 
-        if MOCK_MODE:
+        if train_config.MOCK_MODE:
             self.log(f"[MOCK] {switch_name} set to {position}")
             time.sleep(SWITCH_THROW_SEC)
             return
 
-        # Real hardware code goes here
+        # Real hardware: pulse the appropriate solenoid coil via MOSFET
         self.log(f"[HW] {switch_name} set to {position}")
-        time.sleep(SWITCH_THROW_SEC)
+        self._ensure_gpio()
+        if _GPIO_AVAILABLE and self._gpio_ready:
+            pin = SWITCH_PINS[switch_name]["THROWN" if position == RIGHT else "CLOSED"]
+            _GPIO.output(pin, _GPIO.HIGH)
+            time.sleep(SWITCH_THROW_SEC)
+            _GPIO.output(pin, _GPIO.LOW)
+        else:
+            time.sleep(SWITCH_THROW_SEC)
 
     def set_all_default(self):
         """
@@ -119,7 +170,7 @@ class TrainIO:
         self.crossing_active = active
         state = "ACTIVE" if active else "INACTIVE"
 
-        if MOCK_MODE:
+        if train_config.MOCK_MODE:
             self.log(f"[MOCK] Crossing {state}")
             return
 
@@ -132,7 +183,7 @@ class TrainIO:
     def decouple(self):
         self.coupler_state = "DECOUPLING"
 
-        if MOCK_MODE:
+        if train_config.MOCK_MODE:
             self.log("[MOCK] Decoupler pulse fired")
             time.sleep(COUPLER_PULSE_SEC)
             self.coupler_state = "IDLE"
@@ -145,7 +196,7 @@ class TrainIO:
     def couple(self):
         self.coupler_state = "COUPLING"
 
-        if MOCK_MODE:
+        if train_config.MOCK_MODE:
             self.log("[MOCK] Coupling sequence")
             time.sleep(COUPLER_PULSE_SEC)
             self.coupler_state = "IDLE"
@@ -186,9 +237,29 @@ class TrainIO:
     def send_dcc_packet(self, data_bytes, label="DCC"):
         bits = self.build_dcc_packet(data_bytes)
 
-        if MOCK_MODE:
+        if train_config.MOCK_MODE:
             self.log(f"[MOCK][{label}] bytes={data_bytes}")
             return bits
+
+        # Real hardware: output DCC bits on GPIO18 via pigpio waveforms.
+        # DCC spec: "1" bit = 58 µs high + 58 µs low
+        #           "0" bit = 116 µs high + 116 µs low
+        self._ensure_pigpio()
+        if _PIGPIO_AVAILABLE and self._pi is not None and self._pi.connected:
+            pin_mask = 1 << DCC_GPIO_PIN
+            pulses = []
+            for bit in bits:
+                half = 58 if bit == 1 else 116
+                pulses.append(_pigpio.pulse(pin_mask, 0,        half))  # high
+                pulses.append(_pigpio.pulse(0,        pin_mask, half))  # low
+
+            self._pi.wave_clear()
+            self._pi.wave_add_generic(pulses)
+            wid = self._pi.wave_create()
+            self._pi.wave_send_once(wid)
+            while self._pi.wave_tx_busy():
+                pass
+            self._pi.wave_delete(wid)
 
         self.log(f"[HW][{label}] Sent DCC packet: {data_bytes}")
         return bits

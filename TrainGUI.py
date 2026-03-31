@@ -1,7 +1,9 @@
 # TrainGUI.py
 
+import threading
 import tkinter as tk
 from tkinter import ttk
+import train_config
 from train_config import WINDOW_TITLE, WINDOW_SIZE
 from TrainController import TrainController
 
@@ -26,6 +28,14 @@ class TrainSorterGUI:
         ttk.Button(top, text="Stop", command=self.stop_sort).pack(side="left", padx=6)
         ttk.Button(top, text="Reset", command=self.reset_system).pack(side="left", padx=6)
         ttk.Button(top, text="Show State", command=self.controller.show_state).pack(side="left", padx=6)
+
+        self._mock_var = tk.BooleanVar(value=train_config.MOCK_MODE)
+        ttk.Checkbutton(
+            top,
+            text="Mock Mode",
+            variable=self._mock_var,
+            command=self._toggle_mock_mode,
+        ).pack(side="left", padx=12)
 
         # ------------------------------------------
         # Car destination assignment
@@ -130,7 +140,12 @@ class TrainSorterGUI:
         self.controller.set_consist_order(order)
 
     def start_sort(self):
-        self.root.after(50, self.controller.start_sorting)
+        t = threading.Thread(target=self.controller.start_sorting, daemon=True)
+        t.start()
+
+    def _toggle_mock_mode(self):
+        train_config.MOCK_MODE = self._mock_var.get()
+        self.log(f"[CONFIG] MOCK_MODE = {train_config.MOCK_MODE}")
 
     def stop_sort(self):
         self.controller.stop_sorting()
