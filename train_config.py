@@ -2,6 +2,34 @@
 
 MOCK_MODE = True
 
+# --------------------------------
+# DCC / H-bridge testing
+# --------------------------------
+# False = use real hardware paths
+# True  = only log actions / no GPIO
+#
+# For RFID live testing, you can still temporarily set MOCK_MODE = False
+# when running your RFID test script.
+#
+# For full GUI + H-bridge testing, set MOCK_MODE = False.
+#
+# IMPORTANT:
+# Never connect Pi GPIO directly to rails.
+# Pi GPIO only goes to H-bridge logic inputs.
+
+# When True, DCC packets are sent to a 2-input H-bridge using complementary GPIO.
+# When False, TrainIO falls back to the old single-pin DCC path.
+HBRIDGE_TEST_MODE = True
+
+# Two logic inputs into the H-bridge.
+# GPIO18 stays your main DCC output-related pin.
+# GPIO13 is a free companion pin for opposite polarity drive.
+HBRIDGE_IN1_PIN = 18
+HBRIDGE_IN2_PIN = 13
+
+# Optional: how many times to repeat a DCC packet during a test burst
+DCC_REPEAT_COUNT = 20
+
 # -----------------------------
 # Layout
 # -----------------------------
@@ -29,7 +57,7 @@ STRAIGHT = LEFT
 # Fixed 4-car roster
 # -----------------------------
 CAR_ROSTER = {
-    "CAR_A": {"rfid": "1111AAAA", "default_track": 1},
+    "CAR_A": {"rfid": "73899B1E", "default_track": 1},
     "CAR_B": {"rfid": "2222BBBB", "default_track": 2},
     "CAR_C": {"rfid": "3333CCCC", "default_track": 3},
     "CAR_D": {"rfid": "4444DDDD", "default_track": 4},
@@ -62,15 +90,13 @@ BACK_IN_SPEED = 6
 PULL_OUT_SPEED = 8
 VICTORY_LAP_SPEED = 7
 
+# Old single-pin DCC path (kept for fallback)
+DCC_GPIO_PIN = 18
+
 # -----------------------------
 # Hardware pin assignments
 # -----------------------------
-# DCC signal output (pigpio, hardware-timed)
-DCC_GPIO_PIN = 18
-
-# Solenoid switch pins (BCM numbering, per PCB schematic).
-# THROWN fires to diverge; CLOSED fires to close/straight.
-# Adjust CLOSED pins if your PCB differs.
+# Keep these if you still want your existing switch mapping later.
 SWITCH_PINS = {
     "LOOP": {"THROWN": 17, "CLOSED": 24},
     "S1":   {"THROWN": 27, "CLOSED": 25},

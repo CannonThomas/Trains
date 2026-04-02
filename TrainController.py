@@ -16,23 +16,18 @@ from train_config import (
     VICTORY_LAP_SPEED,
 )
 from TrainIO import TrainIO
+from TrainRFID import TrainRFID
 
 
 class TrainController:
     """
     Consist-aware sorter for this layout.
-
-    Physical model:
-    - Cars are behind the locomotive.
-    - Loco backs the consist into Track 1-4.
-    - Frontmost remaining car behind loco is the next dropped car.
-    - Loco then pulls forward out of the ladder.
-    - Victory lap is separate from the 4 destination tracks.
     """
 
     def __init__(self, logger=print):
         self.logger = logger
         self.io = TrainIO(logger=self.log)
+        self.rfid = TrainRFID(logger=self.log)
         self.running = False
 
         self.car_destinations = {
@@ -56,18 +51,13 @@ class TrainController:
     def log(self, msg: str):
         self.logger(msg)
 
-    # -------------------------------------------------
-    # Configuration
-    # -------------------------------------------------
     def set_destination(self, car_name: str, track: int):
         if car_name not in self.car_destinations:
             self.log(f"[WARN] Unknown car: {car_name}")
             return
-
         if track not in [1, 2, 3, 4]:
             self.log(f"[WARN] Invalid destination track: {track}")
             return
-
         self.car_destinations[car_name] = track
         self.log(f"[CFG] {car_name} -> Track {track}")
 
@@ -76,14 +66,10 @@ class TrainController:
         if sorted(cars) != valid_cars:
             self.log("[WARN] Invalid consist order ignored")
             return
-
         self.initial_consist = list(cars)
         self.consist = list(cars)
         self.log(f"[CFG] Consist order set to: {self.consist}")
 
-    # -------------------------------------------------
-    # State reporting
-    # -------------------------------------------------
     def show_state(self):
         self.log(f"[STATE] Remaining consist: {self.consist}")
         self.log(f"[STATE] Track contents: {self.track_contents}")
@@ -94,9 +80,6 @@ class TrainController:
             return None
         return self.consist[0]
 
-    # -------------------------------------------------
-    # Internal motion helpers
-    # -------------------------------------------------
     def loco_stop(self):
         self.current_speed = 0
         self.io.dcc_loco_speed(LOCO_ADDRESS, 0, self.current_direction_forward)
@@ -114,9 +97,59 @@ class TrainController:
         self.io.dcc_loco_speed(LOCO_ADDRESS, speed, False)
         self.log(f"[LOCO] Reverse speed {speed}")
 
-    # -------------------------------------------------
-    # Automated sequence helpers
-    # -------------------------------------------------
+    # -----------------------------
+    # RFID + DCC test helpers
+    # -----------------------------
+    def scan_rfid_once(self):
+        tag = self.rfid.read_tag(timeout_sec=1.0)
+        if not tag:
+            self.log("[RFID] No tag detected")
+            return None
+
+        car_name = self.rfid.identify_car(tag)
+        if not car_name:
+            self.log(f"[RFID] Unknown tag detected: {tag}")
+            return tag
+
+        track = self.car_destinations[car_name]
+        self.log(f"[RFID] Tag {tag} -> {car_name} -> destination Track {track}")
+        return tag
+
+    def scan_and_prepare_route(self):
+        tag = self.rfid.read_tag(timeout_sec=1.0)
+        if not tag:
+            self.log("[RFID] No tag detected")
+            return
+
+        car_name = self.rfid.identify_car(tag)
+        if not car_name:
+            self.log(f"[RFID] Unknown tag detected: {tag}")
+            return
+
+        target_track = self.car_destinations[car_name]
+        self.log(f"[RFID] Tag {tag} -> {car_name} -> Track {target_track}")
+        self.io.route_to_track(target_track)
+        self.log("[TEST] Route set from RFID result")
+
+    def dcc_test_idle(self):
+        self.io.dcc_idle()
+        self.log("[TEST] Sent DCC idle packet")
+
+    def dcc_test_forward(self):
+        self.loco_forward(APPROACH_SPEED)
+        self.log("[TEST] Sent DCC forward command")
+
+    def dcc_test_reverse(self):
+        self.loco_reverse(BACK_IN_SPEED)
+        self.log("[TEST] Sent DCC reverse command")
+
+    def dcc_test_stop(self):
+        self.loco_stop()
+        self.log("[TEST] Sent DCC stop command")
+
+    # -----------------------------
+    # Existing automated flow
+    # -----------------------------
     def send_loco_to_victory_lap(self):
         self.log("[SEQ] Sending locomotive to Victory Lap")
         self.io.route_to_victory_lap()
@@ -133,10 +166,7 @@ class TrainController:
             self.log("[SEQ] Aborted before start")
             return False
 
-        # Make sure the loop switch allows access to main line
         self.io.route_to_main_from_loop()
-
-        # Approach ladder
         self.io.set_crossing(True)
         self.loco_forward(APPROACH_SPEED)
         time.sleep(APPROACH_SEC)
@@ -148,10 +178,8 @@ class TrainController:
             self.log("[SEQ] Aborted after approach")
             return False
 
-        # Set track route
         self.io.route_to_track(target_track)
 
-        # Back cars into selected track
         self.loco_reverse(BACK_IN_SPEED)
         time.sleep(BACK_IN_SEC)
         self.loco_stop()
@@ -162,7 +190,6 @@ class TrainController:
             self.log("[SEQ] Aborted after back-in")
             return False
 
-        # Let train settle, then decouple
         time.sleep(DECOUPLE_SETTLE_SEC)
         self.io.decouple()
 
@@ -172,7 +199,6 @@ class TrainController:
             self.log("[SEQ] Aborted after decouple")
             return False
 
-        # Pull locomotive + remaining consist forward out of ladder
         self.loco_forward(PULL_OUT_SPEED)
         time.sleep(PULL_OUT_SEC)
         self.loco_stop()
@@ -242,9 +268,6 @@ class TrainController:
         self.log("[SYSTEM] Reset complete")
         self.show_state()
 
-    # -------------------------------------------------
-    # Manual utility actions for GUI
-    # -------------------------------------------------
     def manual_route_track(self, track: int):
         self.io.route_to_track(track)
 

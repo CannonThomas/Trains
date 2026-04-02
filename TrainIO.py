@@ -15,10 +15,12 @@ from train_config import (
     STRAIGHT,
     SWITCH_PINS,
     DCC_GPIO_PIN,
+    HBRIDGE_TEST_MODE,
+    HBRIDGE_IN1_PIN,
+    HBRIDGE_IN2_PIN,
+    DCC_REPEAT_COUNT,
 )
 
-# Optional hardware libraries — imported at module level so the rest of the
-# file works on non-Pi systems (MOCK_MODE) without crashing on import.
 try:
     import pigpio as _pigpio
     _PIGPIO_AVAILABLE = True
@@ -40,6 +42,7 @@ class TrainIO:
     - crossing
     - coupler / uncoupler
     - DCC packet creation
+    - optional H-bridge DCC test output
     """
 
     def __init__(self, logger=print):
@@ -47,17 +50,16 @@ class TrainIO:
         self.switch_positions = {name: LEFT for name in SWITCH_NAMES}
         self.crossing_active = False
         self.coupler_state = "IDLE"
-        self._pi = None          # pigpio.pi() instance, created on first real use
-        self._gpio_ready = False  # True once RPi.GPIO pins are configured
+        self._pi = None
+        self._gpio_ready = False
 
     def log(self, msg: str):
         self.logger(msg)
 
     # -----------------------------------------
-    # Lazy hardware initialisation
+    # Lazy hardware init
     # -----------------------------------------
     def _ensure_gpio(self):
-        """Set up RPi.GPIO for solenoid switch pins on first real use."""
         if self._gpio_ready or not _GPIO_AVAILABLE:
             return
         _GPIO.setmode(_GPIO.BCM)
@@ -67,7 +69,6 @@ class TrainIO:
         self._gpio_ready = True
 
     def _ensure_pigpio(self):
-        """Connect to the pigpio daemon and configure the DCC output pin."""
         if self._pi is not None and self._pi.connected:
             return
         if not _PIGPIO_AVAILABLE:
@@ -75,6 +76,11 @@ class TrainIO:
         self._pi = _pigpio.pi()
         if self._pi.connected:
             self._pi.set_mode(DCC_GPIO_PIN, _pigpio.OUTPUT)
+            self._pi.write(DCC_GPIO_PIN, 0)
+            self._pi.set_mode(HBRIDGE_IN1_PIN, _pigpio.OUTPUT)
+            self._pi.set_mode(HBRIDGE_IN2_PIN, _pigpio.OUTPUT)
+            self._pi.write(HBRIDGE_IN1_PIN, 0)
+            self._pi.write(HBRIDGE_IN2_PIN, 0)
         else:
             self.log("[WARN] pigpio daemon not reachable — DCC disabled")
             self._pi = None
@@ -91,7 +97,6 @@ class TrainIO:
             self.log(f"[WARN] Invalid position for {switch_name}: {position}")
             return
 
-        # Skip spam if already in desired position
         if self.switch_positions[switch_name] == position:
             return
 
@@ -102,7 +107,6 @@ class TrainIO:
             time.sleep(SWITCH_THROW_SEC)
             return
 
-        # Real hardware: pulse the appropriate solenoid coil via MOSFET
         self.log(f"[HW] {switch_name} set to {position}")
         self._ensure_gpio()
         if _GPIO_AVAILABLE and self._gpio_ready:
@@ -114,11 +118,6 @@ class TrainIO:
             time.sleep(SWITCH_THROW_SEC)
 
     def set_all_default(self):
-        """
-        Default state:
-        - LOOP goes to main sorting line
-        - S1/S2/S3 stay straight
-        """
         self.set_switch("LOOP", LOOP_TO_MAIN)
         self.set_switch("S1", STRAIGHT)
         self.set_switch("S2", STRAIGHT)
@@ -133,17 +132,8 @@ class TrainIO:
         self.set_switch("LOOP", LOOP_TO_VICTORY)
 
     def route_to_track(self, track: int):
-        """
-        Cascaded 4-track decision tree:
-
-        Track 1: S1 = BRANCH
-        Track 2: S1 = STRAIGHT, S2 = BRANCH
-        Track 3: S1 = STRAIGHT, S2 = STRAIGHT, S3 = BRANCH
-        Track 4: S1 = STRAIGHT, S2 = STRAIGHT, S3 = STRAIGHT
-        """
         self.log(f"[ROUTE] Setting sorting path to Track {track}")
 
-        # Reset tree first
         self.set_switch("LOOP", LOOP_TO_MAIN)
         self.set_switch("S1", STRAIGHT)
         self.set_switch("S2", STRAIGHT)
@@ -174,7 +164,6 @@ class TrainIO:
             self.log(f"[MOCK] Crossing {state}")
             return
 
-        # Real hardware code goes here
         self.log(f"[HW] Crossing {state}")
 
     # -----------------------------------------
@@ -234,34 +223,97 @@ class TrainIO:
 
         return bits
 
+    def _send_dcc_hbridge_packet(self, bits, label="DCC"):
+        """
+        Send DCC by driving a 2-input H-bridge with complementary outputs.
+
+        Half-cycle mapping:
+        - first half:  IN1=1, IN2=0
+        - second half: IN1=0, IN2=1
+
+        DCC timing:
+        - bit 1 = 58us + 58us
+        - bit 0 = 116us + 116us
+        """
+        self._ensure_pigpio()
+        if not (_PIGPIO_AVAILABLE and self._pi is not None and self._pi.connected):
+            self.log("[WARN] pigpio unavailable, H-bridge DCC not sent")
+            return False
+
+        mask_in1 = 1 << HBRIDGE_IN1_PIN
+        mask_in2 = 1 << HBRIDGE_IN2_PIN
+
+        pulses = []
+        for _ in range(DCC_REPEAT_COUNT):
+            for bit in bits:
+                half = 58 if bit == 1 else 116
+                pulses.append(_pigpio.pulse(mask_in1, mask_in2, half))
+                pulses.append(_pigpio.pulse(mask_in2, mask_in1, half))
+
+        self._pi.wave_clear()
+        self._pi.wave_add_generic(pulses)
+        wid = self._pi.wave_create()
+        if wid < 0:
+            self.log("[WARN] Failed to create pigpio wave")
+            return False
+
+        self._pi.wave_send_once(wid)
+        while self._pi.wave_tx_busy():
+            time.sleep(0.001)
+
+        self._pi.wave_delete(wid)
+        self._pi.write(HBRIDGE_IN1_PIN, 0)
+        self._pi.write(HBRIDGE_IN2_PIN, 0)
+
+        self.log(f"[HW][{label}] Sent H-bridge DCC packet")
+        return True
+
+    def _send_dcc_single_pin_packet(self, bits, label="DCC"):
+        """
+        Old single-pin fallback. Useful only if your hardware later expects one DCC input.
+        """
+        self._ensure_pigpio()
+        if not (_PIGPIO_AVAILABLE and self._pi is not None and self._pi.connected):
+            self.log("[WARN] pigpio unavailable, single-pin DCC not sent")
+            return False
+
+        pin_mask = 1 << DCC_GPIO_PIN
+        pulses = []
+        for _ in range(DCC_REPEAT_COUNT):
+            for bit in bits:
+                half = 58 if bit == 1 else 116
+                pulses.append(_pigpio.pulse(pin_mask, 0, half))
+                pulses.append(_pigpio.pulse(0, pin_mask, half))
+
+        self._pi.wave_clear()
+        self._pi.wave_add_generic(pulses)
+        wid = self._pi.wave_create()
+        if wid < 0:
+            self.log("[WARN] Failed to create pigpio wave")
+            return False
+
+        self._pi.wave_send_once(wid)
+        while self._pi.wave_tx_busy():
+            time.sleep(0.001)
+
+        self._pi.wave_delete(wid)
+        self._pi.write(DCC_GPIO_PIN, 0)
+
+        self.log(f"[HW][{label}] Sent single-pin DCC packet")
+        return True
+
     def send_dcc_packet(self, data_bytes, label="DCC"):
         bits = self.build_dcc_packet(data_bytes)
 
         if train_config.MOCK_MODE:
-            self.log(f"[MOCK][{label}] bytes={data_bytes}")
+            self.log(f"[MOCK][{label}] bytes={data_bytes}, bits={bits}")
             return bits
 
-        # Real hardware: output DCC bits on GPIO18 via pigpio waveforms.
-        # DCC spec: "1" bit = 58 µs high + 58 µs low
-        #           "0" bit = 116 µs high + 116 µs low
-        self._ensure_pigpio()
-        if _PIGPIO_AVAILABLE and self._pi is not None and self._pi.connected:
-            pin_mask = 1 << DCC_GPIO_PIN
-            pulses = []
-            for bit in bits:
-                half = 58 if bit == 1 else 116
-                pulses.append(_pigpio.pulse(pin_mask, 0,        half))  # high
-                pulses.append(_pigpio.pulse(0,        pin_mask, half))  # low
+        if HBRIDGE_TEST_MODE:
+            self._send_dcc_hbridge_packet(bits, label=label)
+        else:
+            self._send_dcc_single_pin_packet(bits, label=label)
 
-            self._pi.wave_clear()
-            self._pi.wave_add_generic(pulses)
-            wid = self._pi.wave_create()
-            self._pi.wave_send_once(wid)
-            while self._pi.wave_tx_busy():
-                pass
-            self._pi.wave_delete(wid)
-
-        self.log(f"[HW][{label}] Sent DCC packet: {data_bytes}")
         return bits
 
     def dcc_loco_speed(self, address: int, speed: int, forward: bool = True):
@@ -269,6 +321,10 @@ class TrainIO:
         direction_bit = 0x20 if forward else 0x00
         speed_byte = 0x40 | direction_bit | speed
         return self.send_dcc_packet([address, speed_byte], label="LOCO_SPEED")
+
+    def dcc_idle(self):
+        # Common simple idle packet
+        return self.send_dcc_packet([0xFF, 0x00], label="IDLE")
 
     def dcc_function(self, address: int, function_group_byte: int):
         return self.send_dcc_packet([address, function_group_byte], label="LOCO_FUNC")

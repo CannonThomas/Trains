@@ -18,9 +18,6 @@ class TrainSorterGUI:
         self._build_widgets()
 
     def _build_widgets(self):
-        # ------------------------------------------
-        # Main sorter controls
-        # ------------------------------------------
         top = ttk.LabelFrame(self.root, text="Main Controls", padding=10)
         top.pack(fill="x", padx=10, pady=10)
 
@@ -37,9 +34,6 @@ class TrainSorterGUI:
             command=self._toggle_mock_mode,
         ).pack(side="left", padx=12)
 
-        # ------------------------------------------
-        # Car destination assignment
-        # ------------------------------------------
         dest_frame = ttk.LabelFrame(self.root, text="Car Destination Assignment", padding=10)
         dest_frame.pack(fill="x", padx=10, pady=10)
 
@@ -68,9 +62,6 @@ class TrainSorterGUI:
                 command=lambda c=car_name, v=var: self.apply_destination(c, v)
             ).grid(row=row_index, column=2, padx=5, pady=5)
 
-        # ------------------------------------------
-        # Starting consist order
-        # ------------------------------------------
         consist_frame = ttk.LabelFrame(self.root, text="Starting Consist Order", padding=10)
         consist_frame.pack(fill="x", padx=10, pady=10)
 
@@ -100,9 +91,6 @@ class TrainSorterGUI:
             command=self.apply_consist_order
         ).grid(row=1, column=0, columnspan=8, pady=8)
 
-        # ------------------------------------------
-        # Manual test / debug controls
-        # ------------------------------------------
         manual_frame = ttk.LabelFrame(self.root, text="Manual Test Controls", padding=10)
         manual_frame.pack(fill="x", padx=10, pady=10)
 
@@ -111,11 +99,22 @@ class TrainSorterGUI:
         ttk.Button(manual_frame, text="Route Track 3", command=lambda: self.controller.manual_route_track(3)).pack(side="left", padx=5)
         ttk.Button(manual_frame, text="Route Track 4", command=lambda: self.controller.manual_route_track(4)).pack(side="left", padx=5)
         ttk.Button(manual_frame, text="Decouple", command=self.controller.manual_decouple).pack(side="left", padx=5)
-        ttk.Button(manual_frame, text="Send to Victory Lap", command=self.controller.manual_send_to_victory_lap).pack(side="left", padx=5)
+        ttk.Button(manual_frame, text="Victory Lap", command=self.controller.manual_send_to_victory_lap).pack(side="left", padx=5)
 
-        # ------------------------------------------
-        # Log output
-        # ------------------------------------------
+        rfid_frame = ttk.LabelFrame(self.root, text="RFID Test Controls", padding=10)
+        rfid_frame.pack(fill="x", padx=10, pady=10)
+
+        ttk.Button(rfid_frame, text="Scan RFID", command=self.scan_rfid).pack(side="left", padx=5)
+        ttk.Button(rfid_frame, text="Scan + Route", command=self.scan_and_route).pack(side="left", padx=5)
+
+        dcc_frame = ttk.LabelFrame(self.root, text="DCC / H-Bridge Test Controls", padding=10)
+        dcc_frame.pack(fill="x", padx=10, pady=10)
+
+        ttk.Button(dcc_frame, text="DCC Idle", command=self.dcc_idle).pack(side="left", padx=5)
+        ttk.Button(dcc_frame, text="DCC Forward", command=self.dcc_forward).pack(side="left", padx=5)
+        ttk.Button(dcc_frame, text="DCC Reverse", command=self.dcc_reverse).pack(side="left", padx=5)
+        ttk.Button(dcc_frame, text="DCC Stop", command=self.dcc_stop).pack(side="left", padx=5)
+
         log_frame = ttk.LabelFrame(self.root, text="System Log", padding=10)
         log_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -136,12 +135,28 @@ class TrainSorterGUI:
         if len(set(order)) != 4:
             self.log("[GUI] Invalid consist order: duplicate cars selected")
             return
-
         self.controller.set_consist_order(order)
 
     def start_sort(self):
-        t = threading.Thread(target=self.controller.start_sorting, daemon=True)
-        t.start()
+        threading.Thread(target=self.controller.start_sorting, daemon=True).start()
+
+    def scan_rfid(self):
+        threading.Thread(target=self.controller.scan_rfid_once, daemon=True).start()
+
+    def scan_and_route(self):
+        threading.Thread(target=self.controller.scan_and_prepare_route, daemon=True).start()
+
+    def dcc_idle(self):
+        threading.Thread(target=self.controller.dcc_test_idle, daemon=True).start()
+
+    def dcc_forward(self):
+        threading.Thread(target=self.controller.dcc_test_forward, daemon=True).start()
+
+    def dcc_reverse(self):
+        threading.Thread(target=self.controller.dcc_test_reverse, daemon=True).start()
+
+    def dcc_stop(self):
+        threading.Thread(target=self.controller.dcc_test_stop, daemon=True).start()
 
     def _toggle_mock_mode(self):
         train_config.MOCK_MODE = self._mock_var.get()
