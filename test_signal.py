@@ -1,30 +1,30 @@
-import RPi.GPIO as GPIO
+import gpiod
 import time
 
-# Use BCM numbering
-GPIO.setmode(GPIO.BCM)
+chip = gpiod.Chip('gpiochip4')  # Pi 5 uses gpiochip4
 
-# Choose your pins (CHANGE if needed)
-PIN_A = 23  # IN1
-PIN_B = 24  # IN2
+PIN_A = 23
+PIN_B = 24
 
-GPIO.setup(PIN_A, GPIO.OUT)
-GPIO.setup(PIN_B, GPIO.OUT)
+line_a = chip.get_line(PIN_A)
+line_b = chip.get_line(PIN_B)
 
-print("Starting signal test...")
+line_a.request(consumer="dcc", type=gpiod.LINE_REQ_DIR_OUT)
+line_b.request(consumer="dcc", type=gpiod.LINE_REQ_DIR_OUT)
+
+print("Starting Pi5 signal test...")
 
 try:
     while True:
-        # State 1
-        GPIO.output(PIN_A, 1)
-        GPIO.output(PIN_B, 0)
-        time.sleep(0.000058)  # ~58 microseconds
+        line_a.set_value(1)
+        line_b.set_value(0)
+        time.sleep(0.000058)
 
-        # State 2 (flip polarity)
-        GPIO.output(PIN_A, 0)
-        GPIO.output(PIN_B, 1)
+        line_a.set_value(0)
+        line_b.set_value(1)
         time.sleep(0.000058)
 
 except KeyboardInterrupt:
-    print("Stopping...")
-    GPIO.cleanup()
+    line_a.set_value(0)
+    line_b.set_value(0)
+    print("Stopped")
