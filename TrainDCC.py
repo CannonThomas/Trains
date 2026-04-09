@@ -27,8 +27,8 @@ class TrainDCC:
         self._running = False
         self._refresh_thread = None
 
-        # current command state
-        self._current_mode = "idle"   # "idle", "stop", "forward", "reverse"
+        # "off" means no waveform output at all
+        self._current_mode = "off"   # off, idle, stop, forward, reverse
         self._current_speed = 0
         self._current_repeat = 6
 
@@ -41,17 +41,23 @@ class TrainDCC:
 
         self.h = lgpio.gpiochip_open(0)
 
+        # ENA as normal output
         lgpio.gpio_claim_output(self.h, self.pin_en, 0)
+
+        # complementary DCC pins as a group
         lgpio.group_claim_output(self.h, [self.pin_a, self.pin_b], [0, 0])
 
         self.write = lgpio.gpio_write
+
+        # enable H-bridge but keep both inputs LOW until commanded
         self.write(self.h, self.pin_en, 1)
+        self._set_outputs_low()
 
         self._running = True
         self._refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self._refresh_thread.start()
 
-        self.logger(f"[DCC] H-bridge enabled (IN1={self.pin_a}, IN2={self.pin_b}, ENA={self.pin_en})")
+        self.logger(f"[DCC] Ready (IN1={self.pin_a}, IN2={self.pin_b}, ENA={self.pin_en})")
 
     def cleanup(self):
         self._running = False
@@ -69,13 +75,12 @@ class TrainDCC:
             pass
 
         try:
-            self.write(self.h, self.pin_en, 0)
+            self._set_outputs_low()
         except Exception:
             pass
 
         try:
-            # force both DCC inputs low before freeing
-            lgpio.group_write(self.h, self.group_leader, 0b00, 0b11)
+            self.write(self.h, self.pin_en, 0)
         except Exception:
             pass
 
@@ -96,6 +101,12 @@ class TrainDCC:
 
         self.h = None
         self.logger("[DCC] GPIO cleaned up")
+
+    def _set_outputs_low(self):
+        if self.h is None:
+            return
+        # mask 0b11 means update both pins, bits 0b00 means both LOW
+        lgpio.group_write(self.h, self.group_leader, 0b00, 0b11)
 
     # -------------------------------------------------
     # DCC packet helpers
@@ -127,12 +138,9 @@ class TrainDCC:
         # group order is exactly [pin_a, pin_b]
         # bit 0 -> pin_a (IN1)
         # bit 1 -> pin_b (IN2)
-        #
-        # first half-cycle:  IN1=1, IN2=0
-        # second half-cycle: IN1=0, IN2=1
         return [
-            self.Pulse(1 << 0, (1 << 0) | (1 << 1), us),
-            self.Pulse(1 << 1, (1 << 0) | (1 << 1), us),
+            self.Pulse(1 << 0, 0b11, us),  # IN1=1, IN2=0
+            self.Pulse(1 << 1, 0b11, us),  # IN1=0, IN2=1
         ]
 
     def bitstream_to_pulses(self, bits):
@@ -171,13 +179,6 @@ class TrainDCC:
     # -------------------------------------------------
     @staticmethod
     def _speed_28_step_data(step, forward=True):
-        """
-        28-step speed packet:
-          01DCSSSS
-        D = direction
-        C = speed bit 0
-        SSSS = speed bits 4..1
-        """
         step = max(0, min(28, step))
 
         if step == 0:
@@ -208,12 +209,18 @@ class TrainDCC:
                     speed = self._current_speed
                     repeat = self._current_repeat
 
-                if mode == "idle":
+                if mode == "off":
+                    self._set_outputs_low()
+
+                elif mode == "idle":
                     self._send_idle_once(repeat=repeat)
+
                 elif mode == "stop":
                     self._send_stop_once(repeat=repeat)
+
                 elif mode == "forward":
                     self._send_forward_once(speed=speed, repeat=repeat)
+
                 elif mode == "reverse":
                     self._send_reverse_once(speed=speed, repeat=repeat)
 
@@ -245,6 +252,14 @@ class TrainDCC:
     # -------------------------------------------------
     # Public command state setters
     # -------------------------------------------------
+    def off(self):
+        with self._lock:
+            self._current_mode = "off"
+            self._current_speed = 0
+            self._current_repeat = 0
+        self._set_outputs_low()
+        self.logger("[DCC] outputs off")
+
     def dcc_idle(self, repeat=3):
         with self._lock:
             self._current_mode = "idle"
