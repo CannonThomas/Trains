@@ -1,334 +1,174 @@
 # TrainIO.py
-
 import time
 import train_config
-from train_config import (
-    SWITCH_NAMES,
-    LEFT,
-    RIGHT,
-    SWITCH_THROW_SEC,
-    COUPLER_PULSE_SEC,
-    DCC_PREAMBLE_BITS,
-    LOOP_TO_MAIN,
-    LOOP_TO_VICTORY,
-    BRANCH,
-    STRAIGHT,
-    SWITCH_PINS,
-    DCC_GPIO_PIN,
-    HBRIDGE_TEST_MODE,
-    HBRIDGE_IN1_PIN,
-    HBRIDGE_IN2_PIN,
-    DCC_REPEAT_COUNT,
-)
+from TrainDCC import TrainDCC
 
 try:
-    import pigpio as _pigpio
-    _PIGPIO_AVAILABLE = True
+    from TrainMock import TrainMock
 except ImportError:
-    _PIGPIO_AVAILABLE = False
+    TrainMock = None
 
 try:
-    import RPi.GPIO as _GPIO
-    _GPIO_AVAILABLE = True
+    import lgpio
 except ImportError:
-    _GPIO_AVAILABLE = False
+    lgpio = None
 
 
 class TrainIO:
-    """
-    Hardware abstraction layer for:
-    - loop switch
-    - cascaded sorting switches
-    - crossing
-    - coupler / uncoupler
-    - DCC packet creation
-    - optional H-bridge DCC test output
-    """
-
     def __init__(self, logger=print):
         self.logger = logger
-        self.switch_positions = {name: LEFT for name in SWITCH_NAMES}
-        self.crossing_active = False
-        self.coupler_state = "IDLE"
-        self._pi = None
-        self._gpio_ready = False
+        self.mock_mode = train_config.MOCK_MODE
 
-    def log(self, msg: str):
-        self.logger(msg)
+        self.chip = None
+        self.pin_map = train_config.GPIO_PINS
 
-    # -----------------------------------------
-    # Lazy hardware init
-    # -----------------------------------------
-    def _ensure_gpio(self):
-        if self._gpio_ready or not _GPIO_AVAILABLE:
+        if self.mock_mode:
+            self.dcc = None
+            self.mock = TrainMock(logger=self.logger) if TrainMock else None
+            self.logger("[IO] MOCK_MODE enabled")
             return
-        _GPIO.setmode(_GPIO.BCM)
-        for pins in SWITCH_PINS.values():
-            _GPIO.setup(pins["THROWN"], _GPIO.OUT, initial=_GPIO.LOW)
-            _GPIO.setup(pins["CLOSED"], _GPIO.OUT, initial=_GPIO.LOW)
-        self._gpio_ready = True
 
-    def _ensure_pigpio(self):
-        if self._pi is not None and self._pi.connected:
+        self.mock = None
+
+        self.dcc = TrainDCC(
+            pin_a=23,
+            pin_b=24,
+            pin_en=18,
+            loco_address=train_config.LOCO_ADDRESS,
+            logger=self.logger
+        )
+        self.dcc.setup()
+
+        if lgpio is None:
+            raise RuntimeError("lgpio is required for real hardware mode")
+
+        self.chip = lgpio.gpiochip_open(0)
+
+        for name, pin in self.pin_map.items():
+            lgpio.gpio_claim_output(self.chip, pin, 0)
+
+        self.logger("[IO] Real hardware initialized")
+
+    def _write_pin(self, name, value):
+        if self.mock_mode:
+            self.logger(f"[MOCK IO] {name} -> {value}")
             return
-        if not _PIGPIO_AVAILABLE:
+        lgpio.gpio_write(self.chip, self.pin_map[name], value)
+
+    # -----------------------------
+    # DCC helpers
+    # -----------------------------
+    def dcc_idle(self):
+        if self.mock_mode:
+            self.logger("[MOCK DCC] idle")
             return
-        self._pi = _pigpio.pi()
-        if self._pi.connected:
-            self._pi.set_mode(DCC_GPIO_PIN, _pigpio.OUTPUT)
-            self._pi.write(DCC_GPIO_PIN, 0)
-            self._pi.set_mode(HBRIDGE_IN1_PIN, _pigpio.OUTPUT)
-            self._pi.set_mode(HBRIDGE_IN2_PIN, _pigpio.OUTPUT)
-            self._pi.write(HBRIDGE_IN1_PIN, 0)
-            self._pi.write(HBRIDGE_IN2_PIN, 0)
+        self.dcc.dcc_idle()
+
+    def dcc_loco_speed(self, address, speed, forward=True):
+        if self.mock_mode:
+            direction = "forward" if forward else "reverse"
+            self.logger(f"[MOCK DCC] addr={address} speed={speed} dir={direction}")
+            return
+
+        self.dcc.loco_address = address
+
+        if speed <= 0:
+            self.dcc.stop()
         else:
-            self.log("[WARN] pigpio daemon not reachable — DCC disabled")
-            self._pi = None
+            if forward:
+                self.dcc.forward(speed)
+            else:
+                self.dcc.reverse(speed)
 
-    # -----------------------------------------
-    # Switch control
-    # -----------------------------------------
-    def set_switch(self, switch_name: str, position: str):
-        if switch_name not in self.switch_positions:
-            self.log(f"[WARN] Unknown switch: {switch_name}")
-            return
-
-        if position not in (LEFT, RIGHT):
-            self.log(f"[WARN] Invalid position for {switch_name}: {position}")
-            return
-
-        if self.switch_positions[switch_name] == position:
-            return
-
-        self.switch_positions[switch_name] = position
-
-        if train_config.MOCK_MODE:
-            self.log(f"[MOCK] {switch_name} set to {position}")
-            time.sleep(SWITCH_THROW_SEC)
-            return
-
-        self.log(f"[HW] {switch_name} set to {position}")
-        self._ensure_gpio()
-        if _GPIO_AVAILABLE and self._gpio_ready:
-            pin = SWITCH_PINS[switch_name]["THROWN" if position == RIGHT else "CLOSED"]
-            _GPIO.output(pin, _GPIO.HIGH)
-            time.sleep(SWITCH_THROW_SEC)
-            _GPIO.output(pin, _GPIO.LOW)
-        else:
-            time.sleep(SWITCH_THROW_SEC)
-
-    def set_all_default(self):
-        self.set_switch("LOOP", LOOP_TO_MAIN)
-        self.set_switch("S1", STRAIGHT)
-        self.set_switch("S2", STRAIGHT)
-        self.set_switch("S3", STRAIGHT)
-
+    # -----------------------------
+    # Routing / turnout helpers
+    # -----------------------------
     def route_to_main_from_loop(self):
-        self.log("[ROUTE] Victory Lap -> Main sorting line")
-        self.set_switch("LOOP", LOOP_TO_MAIN)
+        self._write_pin("LOOP", 0)
+        self.logger("[IO] Victory Lap -> Main sorting line")
 
     def route_to_victory_lap(self):
-        self.log("[ROUTE] Main sorting line -> Victory Lap")
-        self.set_switch("LOOP", LOOP_TO_VICTORY)
+        self._write_pin("LOOP", 1)
+        self.logger("[IO] Routed to Victory Lap")
 
-    def route_to_track(self, track: int):
-        self.log(f"[ROUTE] Setting sorting path to Track {track}")
-
-        self.set_switch("LOOP", LOOP_TO_MAIN)
-        self.set_switch("S1", STRAIGHT)
-        self.set_switch("S2", STRAIGHT)
-        self.set_switch("S3", STRAIGHT)
+    def route_to_track(self, track):
+        self.route_to_main_from_loop()
 
         if track == 1:
-            self.set_switch("S1", BRANCH)
+            self._write_pin("S1", 1)
+            self._write_pin("S2", 0)
+            self._write_pin("S3", 0)
         elif track == 2:
-            self.set_switch("S2", BRANCH)
+            self._write_pin("S1", 1)
+            self._write_pin("S2", 1)
+            self._write_pin("S3", 0)
         elif track == 3:
-            self.set_switch("S3", BRANCH)
+            self._write_pin("S1", 0)
+            self._write_pin("S2", 1)
+            self._write_pin("S3", 0)
         elif track == 4:
+            self._write_pin("S1", 0)
+            self._write_pin("S2", 0)
+            self._write_pin("S3", 0)
+        else:
+            self.logger(f"[WARN] Invalid track route request: {track}")
+            return
+
+        self.logger(f"[IO] Routed to Track {track}")
+
+    def set_all_default(self):
+        self._write_pin("LOOP", 0)
+        self._write_pin("S1", 0)
+        self._write_pin("S2", 0)
+        self._write_pin("S3", 0)
+        self.logger("[IO] Turnouts reset to default")
+
+    def set_crossing(self, enabled):
+        state = "ON" if enabled else "OFF"
+        self.logger(f"[IO] Crossing {state}")
+
+    def decouple(self, pulse_sec=0.25):
+        if self.mock_mode:
+            self.logger("[MOCK IO] Decouple pulse")
+            return
+
+        self._write_pin("DECOUPLE", 1)
+        self.logger("[IO] Decouple ON")
+        time.sleep(pulse_sec)
+        self._write_pin("DECOUPLE", 0)
+        self.logger("[IO] Decouple OFF")
+
+    def cleanup(self):
+        if self.mock_mode:
+            self.logger("[IO] Mock cleanup complete")
+            return
+
+        try:
+            self.set_all_default()
+        except Exception:
             pass
-        else:
-            self.log(f"[WARN] Invalid track number: {track}")
 
-    # -----------------------------------------
-    # Crossing control
-    # -----------------------------------------
-    def set_crossing(self, active: bool):
-        if self.crossing_active == active:
-            return
+        try:
+            self._write_pin("DECOUPLE", 0)
+        except Exception:
+            pass
 
-        self.crossing_active = active
-        state = "ACTIVE" if active else "INACTIVE"
+        try:
+            if self.dcc is not None:
+                self.dcc.cleanup()
+        except Exception as e:
+            self.logger(f"[WARN] DCC cleanup failed: {e}")
 
-        if train_config.MOCK_MODE:
-            self.log(f"[MOCK] Crossing {state}")
-            return
+        if self.chip is not None:
+            try:
+                for pin in self.pin_map.values():
+                    try:
+                        lgpio.gpio_free(self.chip, pin)
+                    except Exception:
+                        pass
+                lgpio.gpiochip_close(self.chip)
+            except Exception as e:
+                self.logger(f"[WARN] GPIO cleanup failed: {e}")
 
-        self.log(f"[HW] Crossing {state}")
-
-    # -----------------------------------------
-    # Coupler / uncoupler
-    # -----------------------------------------
-    def decouple(self):
-        self.coupler_state = "DECOUPLING"
-
-        if train_config.MOCK_MODE:
-            self.log("[MOCK] Decoupler pulse fired")
-            time.sleep(COUPLER_PULSE_SEC)
-            self.coupler_state = "IDLE"
-            return
-
-        self.log("[HW] Decoupler pulse fired")
-        time.sleep(COUPLER_PULSE_SEC)
-        self.coupler_state = "IDLE"
-
-    def couple(self):
-        self.coupler_state = "COUPLING"
-
-        if train_config.MOCK_MODE:
-            self.log("[MOCK] Coupling sequence")
-            time.sleep(COUPLER_PULSE_SEC)
-            self.coupler_state = "IDLE"
-            return
-
-        self.log("[HW] Coupling sequence")
-        time.sleep(COUPLER_PULSE_SEC)
-        self.coupler_state = "IDLE"
-
-    # -----------------------------------------
-    # DCC helpers
-    # -----------------------------------------
-    def xor_checksum(self, data_bytes):
-        checksum = 0
-        for value in data_bytes:
-            checksum ^= value
-        return checksum
-
-    def build_dcc_packet(self, data_bytes):
-        checksum = self.xor_checksum(data_bytes)
-        full_bytes = list(data_bytes) + [checksum]
-
-        bits = []
-        bits.extend([1] * DCC_PREAMBLE_BITS)
-        bits.append(0)
-
-        for index, byte in enumerate(full_bytes):
-            for bit_index in range(7, -1, -1):
-                bits.append((byte >> bit_index) & 1)
-
-            if index == len(full_bytes) - 1:
-                bits.append(1)
-            else:
-                bits.append(0)
-
-        return bits
-
-    def _send_dcc_hbridge_packet(self, bits, label="DCC"):
-        """
-        Send DCC by driving a 2-input H-bridge with complementary outputs.
-
-        Half-cycle mapping:
-        - first half:  IN1=1, IN2=0
-        - second half: IN1=0, IN2=1
-
-        DCC timing:
-        - bit 1 = 58us + 58us
-        - bit 0 = 116us + 116us
-        """
-        self._ensure_pigpio()
-        if not (_PIGPIO_AVAILABLE and self._pi is not None and self._pi.connected):
-            self.log("[WARN] pigpio unavailable, H-bridge DCC not sent")
-            return False
-
-        mask_in1 = 1 << HBRIDGE_IN1_PIN
-        mask_in2 = 1 << HBRIDGE_IN2_PIN
-
-        pulses = []
-        for _ in range(DCC_REPEAT_COUNT):
-            for bit in bits:
-                half = 58 if bit == 1 else 116
-                pulses.append(_pigpio.pulse(mask_in1, mask_in2, half))
-                pulses.append(_pigpio.pulse(mask_in2, mask_in1, half))
-
-        self._pi.wave_clear()
-        self._pi.wave_add_generic(pulses)
-        wid = self._pi.wave_create()
-        if wid < 0:
-            self.log("[WARN] Failed to create pigpio wave")
-            return False
-
-        self._pi.wave_send_once(wid)
-        while self._pi.wave_tx_busy():
-            time.sleep(0.001)
-
-        self._pi.wave_delete(wid)
-        self._pi.write(HBRIDGE_IN1_PIN, 0)
-        self._pi.write(HBRIDGE_IN2_PIN, 0)
-
-        self.log(f"[HW][{label}] Sent H-bridge DCC packet")
-        return True
-
-    def _send_dcc_single_pin_packet(self, bits, label="DCC"):
-        """
-        Old single-pin fallback. Useful only if your hardware later expects one DCC input.
-        """
-        self._ensure_pigpio()
-        if not (_PIGPIO_AVAILABLE and self._pi is not None and self._pi.connected):
-            self.log("[WARN] pigpio unavailable, single-pin DCC not sent")
-            return False
-
-        pin_mask = 1 << DCC_GPIO_PIN
-        pulses = []
-        for _ in range(DCC_REPEAT_COUNT):
-            for bit in bits:
-                half = 58 if bit == 1 else 116
-                pulses.append(_pigpio.pulse(pin_mask, 0, half))
-                pulses.append(_pigpio.pulse(0, pin_mask, half))
-
-        self._pi.wave_clear()
-        self._pi.wave_add_generic(pulses)
-        wid = self._pi.wave_create()
-        if wid < 0:
-            self.log("[WARN] Failed to create pigpio wave")
-            return False
-
-        self._pi.wave_send_once(wid)
-        while self._pi.wave_tx_busy():
-            time.sleep(0.001)
-
-        self._pi.wave_delete(wid)
-        self._pi.write(DCC_GPIO_PIN, 0)
-
-        self.log(f"[HW][{label}] Sent single-pin DCC packet")
-        return True
-
-    def send_dcc_packet(self, data_bytes, label="DCC"):
-        bits = self.build_dcc_packet(data_bytes)
-
-        if train_config.MOCK_MODE:
-            self.log(f"[MOCK][{label}] bytes={data_bytes}, bits={bits}")
-            return bits
-
-        if HBRIDGE_TEST_MODE:
-            self._send_dcc_hbridge_packet(bits, label=label)
-        else:
-            self._send_dcc_single_pin_packet(bits, label=label)
-
-        return bits
-
-    def dcc_loco_speed(self, address: int, speed: int, forward: bool = True):
-        speed = max(0, min(speed, 28))
-        direction_bit = 0x20 if forward else 0x00
-        speed_byte = 0x40 | direction_bit | speed
-        return self.send_dcc_packet([address, speed_byte], label="LOCO_SPEED")
-
-    def dcc_idle(self):
-        # Common simple idle packet
-        return self.send_dcc_packet([0xFF, 0x00], label="IDLE")
-
-    def dcc_function(self, address: int, function_group_byte: int):
-        return self.send_dcc_packet([address, function_group_byte], label="LOCO_FUNC")
-
-    def dcc_accessory(self, address: int, activate: bool = True):
-        cmd = 0x01 if activate else 0x00
-        return self.send_dcc_packet([address & 0xFF, cmd], label="ACCESSORY")
+        self.chip = None
+        self.logger("[IO] Cleanup complete")
