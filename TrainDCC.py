@@ -28,7 +28,7 @@ class TrainDCC:
         self._refresh_thread = None
 
         # "off" means no waveform output at all
-        self._current_mode = "off"   # off, idle, stop, forward, reverse
+        self._current_mode = "off"   # off, idle, forward, reverse
         self._current_speed = 0
         self._current_repeat = 6
 
@@ -105,7 +105,7 @@ class TrainDCC:
     def _set_outputs_low(self):
         if self.h is None:
             return
-        # mask 0b11 means update both pins, bits 0b00 means both LOW
+        # update both pins, set both LOW
         lgpio.group_write(self.h, self.group_leader, 0b00, 0b11)
 
     # -------------------------------------------------
@@ -215,9 +215,6 @@ class TrainDCC:
                 elif mode == "idle":
                     self._send_idle_once(repeat=repeat)
 
-                elif mode == "stop":
-                    self._send_stop_once(repeat=repeat)
-
                 elif mode == "forward":
                     self._send_forward_once(speed=speed, repeat=repeat)
 
@@ -234,10 +231,6 @@ class TrainDCC:
     # -------------------------------------------------
     def _send_idle_once(self, repeat=3):
         self.send_packet(0xFF, 0x00, repeat=repeat)
-
-    def _send_stop_once(self, repeat=8):
-        data = self._speed_28_step_data(0, True)
-        self.send_packet(self.loco_address, data, repeat=repeat)
 
     def _send_forward_once(self, speed=10, repeat=8):
         step28 = self._map_raw_speed_to_step28(speed)
@@ -267,12 +260,9 @@ class TrainDCC:
             self._current_repeat = repeat
         self.logger("[DCC] idle mode set")
 
-    def stop(self, repeat=8):
-        with self._lock:
-            self._current_mode = "stop"
-            self._current_speed = 0
-            self._current_repeat = repeat
-        self.logger("[DCC] stop mode set")
+    def stop(self):
+        self.off()
+        self.logger("[DCC] stop = outputs fully off")
 
     def forward(self, speed=20, repeat=8):
         with self._lock:
