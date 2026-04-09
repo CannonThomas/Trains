@@ -56,6 +56,9 @@ class TrainIO:
             return
         lgpio.gpio_write(self.chip, self.pin_map[name], value)
 
+    # -----------------------------
+    # DCC helpers
+    # -----------------------------
     def dcc_idle(self):
         if self.mock_mode:
             self.logger("[MOCK DCC] idle")
@@ -68,7 +71,7 @@ class TrainIO:
             self.logger(f"[MOCK DCC] addr={address} speed={speed} dir={direction}")
             return
 
-        self.dcc.loco_address = address
+        self.dcc.set_address(address)
 
         if speed <= 0:
             self.dcc.stop()
@@ -78,6 +81,15 @@ class TrainIO:
             else:
                 self.dcc.reverse(speed)
 
+    def dcc_power_off(self):
+        if self.mock_mode:
+            self.logger("[MOCK DCC] power off")
+            return
+        self.dcc.power_off()
+
+    # -----------------------------
+    # Routing / turnout helpers
+    # -----------------------------
     def route_to_main_from_loop(self):
         self._write_pin("LOOP", 0)
         self.logger("[IO] Victory Lap -> Main sorting line")
@@ -150,6 +162,7 @@ class TrainIO:
 
         try:
             if self.dcc is not None:
+                self.dcc.power_off()
                 self.dcc.cleanup()
         except Exception as e:
             self.logger(f"[WARN] DCC cleanup failed: {e}")

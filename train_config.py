@@ -14,6 +14,7 @@ CAR_ROSTER = {
 
 DEFAULT_CONSIST_ORDER = ["CAR_A", "CAR_B", "CAR_C", "CAR_D"]
 
+# Bachmann default short DCC address
 LOCO_ADDRESS = 3
 
 # Turnout / accessory GPIOs
@@ -32,15 +33,21 @@ DCC_PINS = {
     "IN2": 24,
 }
 
-# Timing / motion settings
+# Sorting timings
 APPROACH_SEC = 2.0
 BACK_IN_SEC = 2.0
 DECOUPLE_SETTLE_SEC = 0.5
 PULL_OUT_SEC = 2.0
 RETURN_TO_LOOP_SEC = 3.0
 
-# Speed settings
+# Motion speeds used by controller
 APPROACH_SPEED = 20
 BACK_IN_SPEED = 15
 PULL_OUT_SPEED = 20
 VICTORY_LAP_SPEED = 25
+
+# DCC scheduler settings
+DCC_REFRESH_SEC = 0.03
+DCC_PACKET_REPEAT = 3
+DCC_IDLE_REPEAT = 2
+DCC_SPEED_MODE = 28
