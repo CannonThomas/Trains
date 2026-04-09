@@ -56,6 +56,9 @@ class TrainIO:
             return
         lgpio.gpio_write(self.chip, self.pin_map[name], value)
 
+    # -----------------------------
+    # DCC helpers
+    # -----------------------------
     def dcc_idle(self):
         if self.mock_mode:
             self.logger("[MOCK DCC] idle")
@@ -78,6 +81,9 @@ class TrainIO:
             else:
                 self.dcc.reverse(speed)
 
+    # -----------------------------
+    # Routing / turnout helpers
+    # -----------------------------
     def route_to_main_from_loop(self):
         self._write_pin("LOOP", 0)
         self.logger("[IO] Victory Lap -> Main sorting line")

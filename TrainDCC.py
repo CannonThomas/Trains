@@ -1,12 +1,14 @@
 # TrainDCC.py
 import lgpio
 import time
+import threading
 from collections import namedtuple
 
 
 class TrainDCC:
     ONE_US = 58
     ZERO_US = 116
+    REFRESH_SEC = 0.03  # resend current command every 30 ms
 
     Pulse = namedtuple("Pulse", ["group_bits", "group_mask", "pulse_delay"])
 
@@ -20,6 +22,15 @@ class TrainDCC:
         self.h = None
         self.write = None
         self.group_leader = pin_a
+
+        self._lock = threading.Lock()
+        self._running = False
+        self._refresh_thread = None
+
+        # current command state
+        self._current_mode = "idle"   # "idle", "stop", "forward", "reverse"
+        self._current_speed = 0
+        self._current_repeat = 6
 
     # -------------------------------------------------
     # GPIO setup / cleanup
@@ -36,9 +47,19 @@ class TrainDCC:
         self.write = lgpio.gpio_write
         self.write(self.h, self.pin_en, 1)
 
+        self._running = True
+        self._refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
+        self._refresh_thread.start()
+
         self.logger("[DCC] H-bridge enabled")
 
     def cleanup(self):
+        self._running = False
+
+        if self._refresh_thread is not None:
+            self._refresh_thread.join(timeout=0.2)
+            self._refresh_thread = None
+
         if self.h is None:
             return
 
@@ -90,7 +111,7 @@ class TrainDCC:
             bits.append(0)  # start bit
             bits += self.byte_to_bits(byte)
 
-        bits.append(1)  # end bit
+        bits.append(1)  # packet end bit
         return bits
 
     # -------------------------------------------------
@@ -136,56 +157,119 @@ class TrainDCC:
         self.send_bitstream(bits, repeat=repeat)
 
     # -------------------------------------------------
-    # NMRA-ish speed packet helpers
+    # 28-step speed packet helper
+    # Practical, decoder-friendly first pass
     # -------------------------------------------------
     @staticmethod
-    def _speed_28_step_data(speed, forward=True):
+    def _speed_28_step_data(step, forward=True):
         """
         28-step speed packet:
           01DCSSSS
         D = direction
         C = speed bit 0
         SSSS = speed bits 4..1
-
-        This is a practical implementation for testing.
         """
-        speed = max(0, min(28, speed))
+        step = max(0, min(28, step))
 
-        if speed == 0:
+        if step == 0:
             return 0b01000000  # stop
 
-        # map 1..28 to DCC 28-step encoding
-        enc = speed + 3
+        # map 1..28 into DCC 28-step encoding
+        enc = step + 3
         c_bit = enc & 0x01
         s_nibble = (enc >> 1) & 0x0F
         direction_bit = 0x20 if forward else 0x00
 
         return 0x40 | direction_bit | (c_bit << 4) | s_nibble
 
-    # -------------------------------------------------
-    # Public DCC commands
-    # -------------------------------------------------
-    def dcc_idle(self, repeat=3):
-        self.send_packet(0xFF, 0x00, repeat=repeat)
-        self.logger("[DCC] idle packet sent")
+    @staticmethod
+    def _map_raw_speed_to_step28(speed):
+        # Your project speeds are small numbers like 15, 20, 25.
+        # Treat them as already being "commanded speed values" and map into 1..28.
+        speed = max(0, min(126, speed))
+        if speed == 0:
+            return 0
+        return max(1, min(28, int(round(speed * 28 / 126))))
 
-    def stop(self, repeat=8):
+    # -------------------------------------------------
+    # Background resend loop
+    # -------------------------------------------------
+    def _refresh_loop(self):
+        while self._running:
+            try:
+                with self._lock:
+                    mode = self._current_mode
+                    speed = self._current_speed
+                    repeat = self._current_repeat
+
+                if mode == "idle":
+                    self._send_idle_once(repeat=repeat)
+                elif mode == "stop":
+                    self._send_stop_once(repeat=repeat)
+                elif mode == "forward":
+                    self._send_forward_once(speed=speed, repeat=repeat)
+                elif mode == "reverse":
+                    self._send_reverse_once(speed=speed, repeat=repeat)
+
+            except Exception as e:
+                self.logger(f"[DCC] Refresh loop error: {e}")
+
+            time.sleep(self.REFRESH_SEC)
+
+    # -------------------------------------------------
+    # One-shot packet send helpers
+    # -------------------------------------------------
+    def _send_idle_once(self, repeat=3):
+        self.send_packet(0xFF, 0x00, repeat=repeat)
+
+    def _send_stop_once(self, repeat=8):
         data = self._speed_28_step_data(0, True)
         self.send_packet(self.loco_address, data, repeat=repeat)
-        self.logger("[DCC] stop packet sent")
 
-    def forward(self, speed=10, repeat=8):
-        # Map your project speeds like 20/25 down into 28-step range
-        step28 = max(1, min(28, int(round(speed * 28 / 126))))
+    def _send_forward_once(self, speed=10, repeat=8):
+        step28 = self._map_raw_speed_to_step28(speed)
         data = self._speed_28_step_data(step28, True)
         self.send_packet(self.loco_address, data, repeat=repeat)
-        self.logger(f"[DCC] forward packet sent: raw={speed}, step28={step28}, data=0x{data:02X}")
 
-    def reverse(self, speed=10, repeat=8):
-        step28 = max(1, min(28, int(round(speed * 28 / 126))))
+    def _send_reverse_once(self, speed=10, repeat=8):
+        step28 = self._map_raw_speed_to_step28(speed)
         data = self._speed_28_step_data(step28, False)
         self.send_packet(self.loco_address, data, repeat=repeat)
-        self.logger(f"[DCC] reverse packet sent: raw={speed}, step28={step28}, data=0x{data:02X}")
+
+    # -------------------------------------------------
+    # Public command state setters
+    # -------------------------------------------------
+    def dcc_idle(self, repeat=3):
+        with self._lock:
+            self._current_mode = "idle"
+            self._current_speed = 0
+            self._current_repeat = repeat
+        self.logger("[DCC] idle mode set")
+
+    def stop(self, repeat=8):
+        with self._lock:
+            self._current_mode = "stop"
+            self._current_speed = 0
+            self._current_repeat = repeat
+        self.logger("[DCC] stop mode set")
+
+    def forward(self, speed=20, repeat=8):
+        with self._lock:
+            self._current_mode = "forward"
+            self._current_speed = speed
+            self._current_repeat = repeat
+        step28 = self._map_raw_speed_to_step28(speed)
+        data = self._speed_28_step_data(step28, True)
+        self.logger(f"[DCC] forward mode set: raw={speed}, step28={step28}, data=0x{data:02X}")
+
+    def reverse(self, speed=20, repeat=8):
+        with self._lock:
+            self._current_mode = "reverse"
+            self._current_speed = speed
+            self._current_repeat = repeat
+        step28 = self._map_raw_speed_to_step28(speed)
+        data = self._speed_28_step_data(step28, False)
+        self.logger(f"[DCC] reverse mode set: raw={speed}, step28={step28}, data=0x{data:02X}")
 
     # -------------------------------------------------
     # Continuous scope test
