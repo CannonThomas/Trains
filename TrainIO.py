@@ -21,6 +21,7 @@ class TrainIO:
 
         self.chip = None
         self.pin_map = train_config.GPIO_PINS
+        self.dcc_pin_map = train_config.DCC_PINS
 
         if self.mock_mode:
             self.dcc = None
@@ -31,9 +32,9 @@ class TrainIO:
         self.mock = None
 
         self.dcc = TrainDCC(
-            pin_a=23,
-            pin_b=24,
-            pin_en=18,
+            pin_a=self.dcc_pin_map["IN1"],
+            pin_b=self.dcc_pin_map["IN2"],
+            pin_en=self.dcc_pin_map["ENA"],
             loco_address=train_config.LOCO_ADDRESS,
             logger=self.logger
         )
