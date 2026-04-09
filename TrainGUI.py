@@ -13,8 +13,12 @@ class TrainSorterGUI:
         self.root.title(WINDOW_TITLE)
         self.root.geometry(WINDOW_SIZE)
 
+        self.log_text = None
+        self._pending_logs = []
+
         self.controller = TrainController(logger=self.log)
         self._build_widgets()
+        self._flush_pending_logs()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build_widgets(self):
@@ -121,10 +125,30 @@ class TrainSorterGUI:
         self.log_text = tk.Text(log_frame, wrap="word", height=24)
         self.log_text.pack(fill="both", expand=True)
 
-    def log(self, msg: str):
+    def _append_log(self, msg: str):
+        if self.log_text is None:
+            self._pending_logs.append(msg)
+            print(msg)
+            return
+
         self.log_text.insert("end", msg + "\n")
         self.log_text.see("end")
         print(msg)
+
+    def _flush_pending_logs(self):
+        if self.log_text is None:
+            return
+        for msg in self._pending_logs:
+            self.log_text.insert("end", msg + "\n")
+        if self._pending_logs:
+            self.log_text.see("end")
+        self._pending_logs.clear()
+
+    def log(self, msg: str):
+        try:
+            self.root.after(0, lambda m=msg: self._append_log(m))
+        except Exception:
+            print(msg)
 
     def run_background(self, target):
         threading.Thread(target=target, daemon=True).start()
