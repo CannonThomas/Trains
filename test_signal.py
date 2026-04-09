@@ -1,4 +1,4 @@
-import gpiod
+import lgpio
 import time
 
 # -----------------------
@@ -8,18 +8,14 @@ PIN_A = 23   # IN1
 PIN_B = 24   # IN2
 PIN_EN = 18  # ENA
 
-chip = gpiod.Chip("gpiochip4")
+h = lgpio.gpiochip_open(0)
 
-line_a = chip.get_line(PIN_A)
-line_b = chip.get_line(PIN_B)
-line_en = chip.get_line(PIN_EN)
-
-line_a.request(consumer="dcc", type=gpiod.LINE_REQ_DIR_OUT)
-line_b.request(consumer="dcc", type=gpiod.LINE_REQ_DIR_OUT)
-line_en.request(consumer="dcc", type=gpiod.LINE_REQ_DIR_OUT)
+lgpio.gpio_claim_output(h, PIN_A, 0)
+lgpio.gpio_claim_output(h, PIN_B, 0)
+lgpio.gpio_claim_output(h, PIN_EN, 0)
 
 # Enable H-bridge
-line_en.set_value(1)
+lgpio.gpio_write(h, PIN_EN, 1)
 
 # -----------------------
 # MICROSECOND DELAY
@@ -35,37 +31,40 @@ def delay_us(us):
 # -----------------------
 def dcc_bit(us):
     # first half cycle
-    line_a.set_value(1)
-    line_b.set_value(0)
+    lgpio.gpio_write(h, PIN_A, 1)
+    lgpio.gpio_write(h, PIN_B, 0)
     delay_us(us)
 
     # second half cycle (invert)
-    line_a.set_value(0)
-    line_b.set_value(1)
+    lgpio.gpio_write(h, PIN_A, 0)
+    lgpio.gpio_write(h, PIN_B, 1)
     delay_us(us)
 
 def send_one():
-    dcc_bit(58)   # DCC "1"
+    dcc_bit(58)   # DCC "1" half-bit
 
 def send_zero():
-    dcc_bit(100)  # DCC "0"
+    dcc_bit(100)  # your current test "0" half-bit
 
 # -----------------------
 # MAIN LOOP (TEST SIGNAL)
 # -----------------------
-print("Running DCC test signal...")
+print("Running DCC test signal... Press Ctrl+C to stop.")
 
 try:
     while True:
-        # Preamble (lots of 1s)
+        # Preamble
         for _ in range(20):
             send_one()
 
-        # One 0 to separate
+        # Separator
         send_zero()
 
 except KeyboardInterrupt:
     print("Stopping...")
-    line_a.set_value(0)
-    line_b.set_value(0)
-    line_en.set_value(0)
+
+finally:
+    lgpio.gpio_write(h, PIN_A, 0)
+    lgpio.gpio_write(h, PIN_B, 0)
+    lgpio.gpio_write(h, PIN_EN, 0)
+    lgpio.gpiochip_close(h)
