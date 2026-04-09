@@ -51,7 +51,7 @@ class TrainDCC:
         self._refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self._refresh_thread.start()
 
-        self.logger("[DCC] H-bridge enabled")
+        self.logger(f"[DCC] H-bridge enabled (IN1={self.pin_a}, IN2={self.pin_b}, ENA={self.pin_en})")
 
     def cleanup(self):
         self._running = False
@@ -70,6 +70,12 @@ class TrainDCC:
 
         try:
             self.write(self.h, self.pin_en, 0)
+        except Exception:
+            pass
+
+        try:
+            # force both DCC inputs low before freeing
+            lgpio.group_write(self.h, self.group_leader, 0b00, 0b11)
         except Exception:
             pass
 
@@ -118,11 +124,15 @@ class TrainDCC:
     # Waveform helpers
     # -------------------------------------------------
     def _dcc_bit_pulses(self, us):
-        # bit0 -> pin_a (IN1)
-        # bit1 -> pin_b (IN2)
+        # group order is exactly [pin_a, pin_b]
+        # bit 0 -> pin_a (IN1)
+        # bit 1 -> pin_b (IN2)
+        #
+        # first half-cycle:  IN1=1, IN2=0
+        # second half-cycle: IN1=0, IN2=1
         return [
-            self.Pulse(0b01, 0b11, us),  # IN1=1, IN2=0
-            self.Pulse(0b10, 0b11, us),  # IN1=0, IN2=1
+            self.Pulse(1 << 0, (1 << 0) | (1 << 1), us),
+            self.Pulse(1 << 1, (1 << 0) | (1 << 1), us),
         ]
 
     def bitstream_to_pulses(self, bits):
@@ -158,7 +168,6 @@ class TrainDCC:
 
     # -------------------------------------------------
     # 28-step speed packet helper
-    # Practical, decoder-friendly first pass
     # -------------------------------------------------
     @staticmethod
     def _speed_28_step_data(step, forward=True):
@@ -174,7 +183,6 @@ class TrainDCC:
         if step == 0:
             return 0b01000000  # stop
 
-        # map 1..28 into DCC 28-step encoding
         enc = step + 3
         c_bit = enc & 0x01
         s_nibble = (enc >> 1) & 0x0F
@@ -184,8 +192,6 @@ class TrainDCC:
 
     @staticmethod
     def _map_raw_speed_to_step28(speed):
-        # Your project speeds are small numbers like 15, 20, 25.
-        # Treat them as already being "commanded speed values" and map into 1..28.
         speed = max(0, min(126, speed))
         if speed == 0:
             return 0
