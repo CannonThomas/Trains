@@ -2,9 +2,10 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+#include <gpiod.h>
+
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
-#include "hardware/gpio.h"
 #include "genseq.pio.h"
 
 #define PIN_EN   18
@@ -21,12 +22,12 @@ static int build_test_stream(void)
 {
     int idx = 0;
 
-    // Long preamble of 1 bits
+    // Preamble (1 bits)
     for (int i = 0; i < 200 && idx < DATA_WORDS; i++) {
         databuf[idx++] = ONE_US;
     }
 
-    // Some 0 bits after
+    // Some 0 bits
     for (int i = 0; i < 40 && idx < DATA_WORDS; i++) {
         databuf[idx++] = ZERO_US;
     }
@@ -34,18 +35,27 @@ static int build_test_stream(void)
     return idx;
 }
 
-int main(int argc, const char **argv)
+int main()
 {
     bool use_dma = true;
     int ret = 0;
 
     stdio_init_all();
 
-    // Enable H-bridge
-    gpio_init(PIN_EN);
-    gpio_set_dir(PIN_EN, GPIO_OUT);
-    gpio_put(PIN_EN, 1);
+    // -----------------------
+    // ENABLE H-BRIDGE (Linux GPIO)
+    // -----------------------
+    struct gpiod_chip *chip;
+    struct gpiod_line *en_line;
 
+    chip = gpiod_chip_open("/dev/gpiochip0");
+    en_line = gpiod_chip_get_line(chip, PIN_EN);
+
+    gpiod_line_request_output(en_line, "dcc", 1);
+
+    // -----------------------
+    // PIO SETUP
+    // -----------------------
     PIO pio = pio0;
     int sm = pio_claim_unused_sm(pio, true);
     uint offset = pio_add_program(pio, &genseq_program);
@@ -54,10 +64,8 @@ int main(int argc, const char **argv)
 
     printf("Loaded program at %d, using sm %d, gpio %d\n", offset, sm, gpio);
 
-    // Configure transfer path like genseq example
     pio_sm_config_xfer(pio, sm, PIO_DIR_FROM_SM, 256, 1);
 
-    // Init output pin
     pio_gpio_init(pio, gpio);
     pio_sm_set_consecutive_pindirs(pio, sm, gpio, 1, true);
 
@@ -71,8 +79,10 @@ int main(int argc, const char **argv)
 
     printf("Streaming %d timing words\n", count);
 
+    // -----------------------
+    // MAIN LOOP
+    // -----------------------
     while (1) {
-        // Prime FIFO
         pio_sm_put_blocking(pio, sm, 0);
 
         if (use_dma) {
@@ -84,7 +94,7 @@ int main(int argc, const char **argv)
                 databuf
             );
             if (ret) {
-                printf("pio_sm_xfer_data error %d\n", ret);
+                printf("DMA error %d\n", ret);
                 break;
             }
         } else {
@@ -96,6 +106,9 @@ int main(int argc, const char **argv)
         sleep_ms(5);
     }
 
-    gpio_put(PIN_EN, 0);
+    // cleanup
+    gpiod_line_set_value(en_line, 0);
+    gpiod_chip_close(chip);
+
     return ret;
 }
