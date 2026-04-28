@@ -10,8 +10,8 @@
 #include "dcc_wave.pio.h"
 
 #define PIN_EN 18
-#define PIN_A  23
-#define PIN_B  24
+#define PIN_A  23   // L298 IN1
+#define PIN_B  24   // L298 IN2
 
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 116
@@ -46,38 +46,31 @@ static void add_byte(uint8_t b) {
 static void build_packet(void) {
     wave_count = 0;
 
-    // Long stable preamble, like your no-jitter test
     for (int i = 0; i < 200; i++) {
         add_bit(1);
     }
 
-    // Start + address
     add_bit(0);
     add_byte(LOCO_ADDR);
 
-    // Start + command
     add_bit(0);
     add_byte(DCC_DATA);
 
-    // Start + checksum
     add_bit(0);
     add_byte(DCC_CHECKSUM);
 
-    // End bit
     add_bit(1);
 }
 
 static void set_realtime_priority(void) {
     struct sched_param param;
     param.sched_priority = 80;
-
     sched_setscheduler(0, SCHED_FIFO, &param);
     mlockall(MCL_CURRENT | MCL_FUTURE);
 }
 
 int main() {
     stdio_init_all();
-
     set_realtime_priority();
 
     struct gpiod_chip *chip = gpiod_chip_open("/dev/gpiochip0");
@@ -100,15 +93,15 @@ int main() {
 
     pio_gpio_init(pio, PIN_A);
     pio_gpio_init(pio, PIN_B);
+
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
-    sm_config_set_sideset_pins(&c, PIN_A);
 
-    // Try to give TX FIFO more room
+    // IMPORTANT: use SET pins, not side-set pins
+    sm_config_set_set_pins(&c, PIN_A, 2);
+
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
-
-    // 125 MHz / 125 = 1 MHz, so 1 PIO cycle ≈ 1 us
     sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
@@ -116,11 +109,11 @@ int main() {
 
     build_packet();
 
-    printf("Low-jitter DCC packet stream\n");
+    printf("DCC packet stream\n");
     printf("Address: %d\n", LOCO_ADDR);
     printf("Command: %d / 0x%02X\n", DCC_DATA, DCC_DATA);
     printf("Checksum: %d / 0x%02X\n", DCC_CHECKSUM, DCC_CHECKSUM);
-    printf("Half-cycles in packet: %d\n", wave_count);
+    printf("Half-cycles: %d\n", wave_count);
 
     while (1) {
         for (int i = 0; i < wave_count; i++) {
