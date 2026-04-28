@@ -1,8 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <unistd.h>
-#include <sys/select.h>
 #include <gpiod.h>
 
 #include "pico/stdlib.h"
@@ -10,18 +8,16 @@
 #include "dcc_wave.pio.h"
 
 #define PIN_EN 18
-#define PIN_A  23
-#define PIN_B  24
+#define PIN_A  23   // IN1
+#define PIN_B  24   // IN2
 
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 116
 
 #define LOCO_ADDR 3
 #define DCC_INST_128 0x3F
-
-static struct gpiod_line *en_line = NULL;
-static bool track_on = false;
-static uint8_t speed_byte = 0x80;   // stop
+#define DCC_SPEED 0xBC   // forward speed 60
+#define DCC_CHECKSUM (LOCO_ADDR ^ DCC_INST_128 ^ DCC_SPEED)
 
 static inline uint32_t pio_count_from_us(uint32_t us) {
     if (us > 2) return us - 2;
@@ -33,7 +29,6 @@ static inline void send_bit(PIO pio, int sm, int bit,
                             uint32_t zero_count) {
     uint32_t count = bit ? one_count : zero_count;
 
-    // exact same clean style as your old test
     pio_sm_put_blocking(pio, sm, count);
     pio_sm_put_blocking(pio, sm, count);
 }
@@ -46,12 +41,9 @@ static void send_byte(PIO pio, int sm, uint8_t b,
     }
 }
 
-static void send_speed_packet(PIO pio, int sm,
-                              uint32_t one_count,
-                              uint32_t zero_count) {
-    uint8_t checksum = LOCO_ADDR ^ DCC_INST_128 ^ speed_byte;
-
-    // preamble
+static void send_packet(PIO pio, int sm,
+                        uint32_t one_count,
+                        uint32_t zero_count) {
     for (int i = 0; i < 20; i++) {
         send_bit(pio, sm, 1, one_count, zero_count);
     }
@@ -63,85 +55,16 @@ static void send_speed_packet(PIO pio, int sm,
     send_byte(pio, sm, DCC_INST_128, one_count, zero_count);
 
     send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, speed_byte, one_count, zero_count);
+    send_byte(pio, sm, DCC_SPEED, one_count, zero_count);
 
     send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, checksum, one_count, zero_count);
+    send_byte(pio, sm, DCC_CHECKSUM, one_count, zero_count);
 
     send_bit(pio, sm, 1, one_count, zero_count);
 }
 
-static void track_enable(PIO pio, int sm) {
-    gpiod_line_set_value(en_line, 1);
-    pio_sm_set_enabled(pio, sm, true);
-    track_on = true;
-}
-
-static void track_disable(PIO pio, int sm) {
-    gpiod_line_set_value(en_line, 0);
-    pio_sm_set_enabled(pio, sm, false);
-    track_on = false;
-}
-
-static void handle_cmd(PIO pio, int sm) {
-    fd_set rfds;
-    struct timeval tv = {0, 0};
-
-    FD_ZERO(&rfds);
-    FD_SET(STDIN_FILENO, &rfds);
-
-    if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0) {
-        return;
-    }
-
-    char line[64];
-    if (!fgets(line, sizeof(line), stdin)) {
-        return;
-    }
-
-    char dir;
-    int speed;
-
-    if (line[0] == 'S' || line[0] == 's') {
-        speed_byte = 0x80;
-        track_disable(pio, sm);
-        printf("STOP: ENA OFF + PIO OFF\n");
-        fflush(stdout);
-        return;
-    }
-
-    if (sscanf(line, " %c %d", &dir, &speed) == 2) {
-        if (speed < 2) speed = 2;
-        if (speed > 127) speed = 127;
-
-        if (dir == 'F' || dir == 'f') {
-            speed_byte = 0x80 | speed;
-            printf("FORWARD %d | packet %02X %02X %02X %02X\n",
-                   speed,
-                   LOCO_ADDR,
-                   DCC_INST_128,
-                   speed_byte,
-                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
-            track_enable(pio, sm);
-        }
-        else if (dir == 'R' || dir == 'r') {
-            speed_byte = speed;
-            printf("REVERSE %d | packet %02X %02X %02X %02X\n",
-                   speed,
-                   LOCO_ADDR,
-                   DCC_INST_128,
-                   speed_byte,
-                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
-            track_enable(pio, sm);
-        }
-
-        fflush(stdout);
-    }
-}
-
 int main() {
     stdio_init_all();
-    setvbuf(stdout, NULL, _IONBF, 0);
 
     struct gpiod_chip *chip = gpiod_chip_open("/dev/gpiochip0");
     if (!chip) {
@@ -149,15 +72,15 @@ int main() {
         return 1;
     }
 
-    en_line = gpiod_chip_get_line(chip, PIN_EN);
+    struct gpiod_line *en_line = gpiod_chip_get_line(chip, PIN_EN);
     if (!en_line) {
         printf("Failed to get EN line\n");
         gpiod_chip_close(chip);
         return 1;
     }
 
-    if (gpiod_line_request_output(en_line, "dcc", 0) < 0) {
-        printf("Failed to request EN\n");
+    if (gpiod_line_request_output(en_line, "dcc", 1) < 0) {
+        printf("Failed to enable EN\n");
         gpiod_chip_close(chip);
         return 1;
     }
@@ -175,22 +98,17 @@ int main() {
     sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
-    pio_sm_set_enabled(pio, sm, false);
+    pio_sm_set_enabled(pio, sm, true);
 
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("Clean DCC PIO ready: one=%u zero=%u\n", one_count, zero_count);
-    printf("Commands: F <speed>, R <speed>, S\n");
+    printf("Sending DCC packet forever\n");
+    printf("Packet: %02X %02X %02X %02X\n",
+           LOCO_ADDR, DCC_INST_128, DCC_SPEED, DCC_CHECKSUM);
 
     while (1) {
-        handle_cmd(pio, sm);
-
-        if (track_on) {
-            send_speed_packet(pio, sm, one_count, zero_count);
-        } else {
-            usleep(1000);
-        }
+        send_packet(pio, sm, one_count, zero_count);
     }
 
     return 0;
