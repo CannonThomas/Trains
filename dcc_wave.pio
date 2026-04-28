@@ -1,15 +1,14 @@
 .program dcc_wave
+.side_set 2
 
 .wrap_target
-    pull block
-    mov x, osr
-    set pins, 0b01
-hold_a:
-    jmp x-- hold_a
+    pull block      side 0b10
+    mov x, osr      side 0b10
+high_loop:
+    jmp x-- high_loop side 0b10
 
-    pull block
-    mov x, osr
-    set pins, 0b10
-hold_b:
-    jmp x-- hold_b
+    pull block      side 0b01
+    mov x, osr      side 0b01
+low_loop:
+    jmp x-- low_loop side 0b01
 .wrap
