@@ -19,11 +19,8 @@
 #define LOCO_ADDR 3
 #define DCC_INST_128 0x3F
 
-static struct gpiod_line *en_line = NULL;
-
-static uint8_t speed_byte = 0x80;   // stop
-static uint8_t func_byte  = 0x90;   // F0 light ON
-static bool track_on = true;
+static uint8_t speed_byte = 0x80; // stop
+static uint8_t func_byte  = 0x10; // F0/headlight ON
 static int horn_packets = 0;
 
 static inline uint32_t pio_count_from_us(uint32_t us) {
@@ -48,74 +45,57 @@ static void send_byte(PIO pio, int sm, uint8_t b,
 
 static void send_packet3(PIO pio, int sm,
                          uint8_t b0, uint8_t b1, uint8_t b2,
-                         uint32_t one_count,
-                         uint32_t zero_count) {
+                         uint32_t one_count, uint32_t zero_count) {
     for (int i = 0; i < 20; i++) send_bit(pio, sm, 1, one_count, zero_count);
 
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, b0, one_count, zero_count);
-
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, b1, one_count, zero_count);
-
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, b2, one_count, zero_count);
+    send_bit(pio, sm, 0, one_count, zero_count); send_byte(pio, sm, b0, one_count, zero_count);
+    send_bit(pio, sm, 0, one_count, zero_count); send_byte(pio, sm, b1, one_count, zero_count);
+    send_bit(pio, sm, 0, one_count, zero_count); send_byte(pio, sm, b2, one_count, zero_count);
 
     send_bit(pio, sm, 1, one_count, zero_count);
 }
 
 static void send_packet4(PIO pio, int sm,
                          uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3,
-                         uint32_t one_count,
-                         uint32_t zero_count) {
+                         uint32_t one_count, uint32_t zero_count) {
     for (int i = 0; i < 20; i++) send_bit(pio, sm, 1, one_count, zero_count);
 
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, b0, one_count, zero_count);
-
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, b1, one_count, zero_count);
-
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, b2, one_count, zero_count);
-
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, b3, one_count, zero_count);
+    send_bit(pio, sm, 0, one_count, zero_count); send_byte(pio, sm, b0, one_count, zero_count);
+    send_bit(pio, sm, 0, one_count, zero_count); send_byte(pio, sm, b1, one_count, zero_count);
+    send_bit(pio, sm, 0, one_count, zero_count); send_byte(pio, sm, b2, one_count, zero_count);
+    send_bit(pio, sm, 0, one_count, zero_count); send_byte(pio, sm, b3, one_count, zero_count);
 
     send_bit(pio, sm, 1, one_count, zero_count);
 }
 
 static void send_speed_packet(PIO pio, int sm,
-                              uint32_t one_count,
-                              uint32_t zero_count) {
+                              uint32_t one_count, uint32_t zero_count) {
     uint8_t checksum = LOCO_ADDR ^ DCC_INST_128 ^ speed_byte;
     send_packet4(pio, sm, LOCO_ADDR, DCC_INST_128, speed_byte, checksum,
                  one_count, zero_count);
 }
 
 static void send_function_packet(PIO pio, int sm,
-                                 uint32_t one_count,
-                                 uint32_t zero_count) {
-    uint8_t f = func_byte;
+                                 uint32_t one_count, uint32_t zero_count) {
+    /*
+      Function group 1:
+      100D DDDD
+      0x80 base
+      bit 4 = F0/headlight
+      bit 1 = F2/horn
+    */
+    uint8_t f = 0x80 | func_byte;
 
     if (horn_packets > 0) {
-        f = 0x92;   // F0 light ON + F2 horn ON
+        f |= 0x02;        // F2 horn ON
         horn_packets--;
-    } else {
-        f = 0x90;   // F0 light ON only
     }
 
     uint8_t checksum = LOCO_ADDR ^ f;
     send_packet3(pio, sm, LOCO_ADDR, f, checksum, one_count, zero_count);
 }
 
-static void track_enable(PIO pio, int sm) {
-    gpiod_line_set_value(en_line, 1);
-    pio_sm_set_enabled(pio, sm, true);
-    track_on = true;
-}
-
-static void handle_cmd(PIO pio, int sm) {
+static void handle_cmd(void) {
     fd_set rfds;
     struct timeval tv = {0, 0};
 
@@ -131,19 +111,16 @@ static void handle_cmd(PIO pio, int sm) {
     int speed;
 
     if (line[0] == 'S' || line[0] == 's') {
-        speed_byte = 0x80;     // DCC stop
-        func_byte = 0x90;      // lights stay ON
-        horn_packets = 25;     // short horn blast on stop
-        track_enable(pio, sm);
-        printf("STOP | lights ON | horn blast\n");
+        speed_byte = 0x80;  // DCC stop, track power stays on
+        func_byte = 0x10;   // F0/headlight ON
+        printf("STOP | packet 03 3F 80 BC | lights ON\n");
         fflush(stdout);
         return;
     }
 
     if (line[0] == 'H' || line[0] == 'h') {
-        horn_packets = 25;
-        track_enable(pio, sm);
-        printf("HORN\n");
+        horn_packets = 80;
+        printf("HORN TEST | F2 ON briefly\n");
         fflush(stdout);
         return;
     }
@@ -154,15 +131,17 @@ static void handle_cmd(PIO pio, int sm) {
 
         if (dir == 'F' || dir == 'f') {
             speed_byte = 0x80 | speed;
-            printf("FORWARD %d\n", speed);
-        }
-        else if (dir == 'R' || dir == 'r') {
+            printf("FORWARD %d | packet %02X %02X %02X %02X\n",
+                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
+                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
+        } else if (dir == 'R' || dir == 'r') {
             speed_byte = speed;
-            printf("REVERSE %d\n", speed);
+            printf("REVERSE %d | packet %02X %02X %02X %02X\n",
+                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
+                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
         }
 
-        func_byte = 0x90; // keep lights on
-        track_enable(pio, sm);
+        func_byte = 0x10; // keep lights ON
         fflush(stdout);
     }
 }
@@ -172,21 +151,12 @@ int main() {
     setvbuf(stdout, NULL, _IONBF, 0);
 
     struct gpiod_chip *chip = gpiod_chip_open("/dev/gpiochip0");
-    if (!chip) {
-        printf("Failed to open gpiochip0\n");
-        return 1;
-    }
+    if (!chip) return 1;
 
-    en_line = gpiod_chip_get_line(chip, PIN_EN);
-    if (!en_line) {
-        printf("Failed to get EN line\n");
-        return 1;
-    }
+    struct gpiod_line *en_line = gpiod_chip_get_line(chip, PIN_EN);
+    if (!en_line) return 1;
 
-    if (gpiod_line_request_output(en_line, "dcc_enable", 1) < 0) {
-        printf("Failed to request EN line\n");
-        return 1;
-    }
+    if (gpiod_line_request_output(en_line, "dcc_enable", 1) < 0) return 1;
 
     PIO pio = pio0;
     int sm = pio_claim_unused_sm(pio, true);
@@ -206,18 +176,15 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("DCC ready\n");
+    printf("Bachmann GP30 #6944 DCC ready\n");
     printf("Commands: F <speed>, R <speed>, S, H\n");
 
     while (1) {
-        handle_cmd(pio, sm);
+        handle_cmd();
 
-        if (track_on) {
-            send_speed_packet(pio, sm, one_count, zero_count);
-            send_function_packet(pio, sm, one_count, zero_count);
-        } else {
-            usleep(1000);
-        }
+        // send speed often, function packets regularly so lights stay on
+        send_speed_packet(pio, sm, one_count, zero_count);
+        send_function_packet(pio, sm, one_count, zero_count);
     }
 
     return 0;
