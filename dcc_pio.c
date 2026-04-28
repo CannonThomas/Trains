@@ -19,17 +19,13 @@
 #define LOCO_ADDR 3
 #define DCC_INST_128 0x3F
 
-#define DEFAULT_SPEED 60
+#define SPEED_20 20
+#define SPEED_40 40
+#define SPEED_60 60
 
 static struct gpiod_line *en_line = NULL;
-
-static uint8_t speed_byte = 0x80;   // stop
+static uint8_t speed_byte = 0x80;
 static bool track_on = false;
-
-static char current_dir = 'S';
-static char pending_dir = 'S';
-static int pending_speed = DEFAULT_SPEED;
-static int transition_stop_packets = 0;
 
 static inline uint32_t pio_count_from_us(uint32_t us) {
     return (us > 2) ? (us - 2) : 1;
@@ -39,7 +35,6 @@ static inline void send_bit(PIO pio, int sm, int bit,
                             uint32_t one_count,
                             uint32_t zero_count) {
     uint32_t count = bit ? one_count : zero_count;
-
     pio_sm_put_blocking(pio, sm, count);
     pio_sm_put_blocking(pio, sm, count);
 }
@@ -57,9 +52,7 @@ static void send_packet(PIO pio, int sm,
                         uint32_t zero_count) {
     uint8_t checksum = LOCO_ADDR ^ DCC_INST_128 ^ speed_byte;
 
-    for (int i = 0; i < 20; i++) {
-        send_bit(pio, sm, 1, one_count, zero_count);
-    }
+    for (int i = 0; i < 20; i++) send_bit(pio, sm, 1, one_count, zero_count);
 
     send_bit(pio, sm, 0, one_count, zero_count);
     send_byte(pio, sm, LOCO_ADDR, one_count, zero_count);
@@ -80,27 +73,15 @@ static uint8_t make_speed_byte(char dir, int speed) {
     if (speed < 2) speed = 2;
     if (speed > 127) speed = 127;
 
-    if (dir == 'F') {
+    if (dir == 'F' || dir == 'f') {
         return 0x80 | speed;
     }
 
-    if (dir == 'R') {
+    if (dir == 'R' || dir == 'r') {
         return speed;
     }
 
     return 0x80;
-}
-
-static void track_enable(PIO pio, int sm) {
-    gpiod_line_set_value(en_line, 1);
-    pio_sm_set_enabled(pio, sm, true);
-    track_on = true;
-}
-
-static void track_disable(PIO pio, int sm) {
-    gpiod_line_set_value(en_line, 0);
-    pio_sm_set_enabled(pio, sm, false);
-    track_on = false;
 }
 
 static void print_packet(const char *label) {
@@ -115,6 +96,18 @@ static void print_packet(const char *label) {
     fflush(stdout);
 }
 
+static void track_enable(PIO pio, int sm) {
+    gpiod_line_set_value(en_line, 1);
+    pio_sm_set_enabled(pio, sm, true);
+    track_on = true;
+}
+
+static void track_disable(PIO pio, int sm) {
+    gpiod_line_set_value(en_line, 0);
+    pio_sm_set_enabled(pio, sm, false);
+    track_on = false;
+}
+
 static void handle_cmd(PIO pio, int sm) {
     fd_set rfds;
     struct timeval tv = {0, 0};
@@ -122,79 +115,36 @@ static void handle_cmd(PIO pio, int sm) {
     FD_ZERO(&rfds);
     FD_SET(STDIN_FILENO, &rfds);
 
-    if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0) {
-        return;
-    }
+    if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0) return;
 
     char line[64];
-    if (!fgets(line, sizeof(line), stdin)) {
-        return;
-    }
+    if (!fgets(line, sizeof(line), stdin)) return;
 
     char dir;
     int speed;
 
     if (line[0] == 'S' || line[0] == 's') {
-        speed_byte = 0x80;
-        current_dir = 'S';
-        pending_dir = 'S';
-        transition_stop_packets = 0;
-
+        speed_byte = 0x80; // exact stop packet: 03 3F 80 BC
+        print_packet("STOP");
         track_disable(pio, sm);
-        print_packet("STOP | ENA OFF | PIO OFF");
+        printf("ENA OFF | PIO OFF\n");
+        fflush(stdout);
         return;
     }
 
     if (sscanf(line, " %c %d", &dir, &speed) == 2) {
-        if (speed < 2) speed = 2;
-        if (speed > 127) speed = 127;
+        if (dir == 'F' || dir == 'f' || dir == 'R' || dir == 'r') {
+            speed_byte = make_speed_byte(dir, speed);
 
-        if (dir == 'f') dir = 'F';
-        if (dir == 'r') dir = 'R';
+            if (dir == 'F' || dir == 'f') {
+                printf("FORWARD %d\n", speed);
+            } else {
+                printf("REVERSE %d\n", speed);
+            }
 
-        if (dir != 'F' && dir != 'R') {
-            return;
-        }
-
-        /*
-          If changing from F to R or R to F while already running:
-          1. Keep track ON
-          2. Send repeated stop packets first
-          3. Then switch to requested direction
-        */
-        if (track_on &&
-            current_dir != 'S' &&
-            current_dir != dir) {
-
-            speed_byte = 0x80;              // DCC stop packet
-            pending_dir = dir;
-            pending_speed = speed;
-            transition_stop_packets = 40;   // increase to 80 if still flaky
-
+            print_packet("RUN");
             track_enable(pio, sm);
-
-            printf("TRANSITION %c -> STOP BURST -> %c %d\n",
-                   current_dir,
-                   pending_dir,
-                   pending_speed);
-            print_packet("STOP BURST");
-            return;
         }
-
-        speed_byte = make_speed_byte(dir, speed);
-        current_dir = dir;
-        pending_dir = 'S';
-        transition_stop_packets = 0;
-
-        track_enable(pio, sm);
-
-        if (dir == 'F') {
-            printf("FORWARD %d\n", speed);
-        } else {
-            printf("REVERSE %d\n", speed);
-        }
-
-        print_packet("RUN");
     }
 }
 
@@ -237,32 +187,22 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("DCC ready with direction-change stop burst\n");
+    printf("Bachmann GP30 #6944 DCC ready\n");
     printf("Commands: F <speed>, R <speed>, S\n");
+    printf("Known packets:\n");
+    printf("F 20 = 03 3F 94 A8\n");
+    printf("F 40 = 03 3F A8 94\n");
+    printf("F 60 = 03 3F BC 80\n");
+    printf("R 20 = 03 3F 14 28\n");
+    printf("R 40 = 03 3F 28 14\n");
+    printf("R 60 = 03 3F 3C 00\n");
+    printf("S    = 03 3F 80 BC\n");
 
     while (1) {
         handle_cmd(pio, sm);
 
         if (track_on) {
             send_packet(pio, sm, one_count, zero_count);
-
-            if (transition_stop_packets > 0) {
-                transition_stop_packets--;
-
-                if (transition_stop_packets == 0 && pending_dir != 'S') {
-                    speed_byte = make_speed_byte(pending_dir, pending_speed);
-                    current_dir = pending_dir;
-                    pending_dir = 'S';
-
-                    if (current_dir == 'F') {
-                        printf("NOW FORWARD %d\n", pending_speed);
-                    } else {
-                        printf("NOW REVERSE %d\n", pending_speed);
-                    }
-
-                    print_packet("RUN AFTER STOP BURST");
-                }
-            }
         } else {
             usleep(1000);
         }
