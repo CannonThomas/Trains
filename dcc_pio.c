@@ -14,29 +14,10 @@
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 116
 
-#define LOCO_ADDR 3
-#define DCC_DATA  104   // simple forward command (works on many decoders)
-
 static inline uint32_t pio_count_from_us(uint32_t us) {
+    // pull + mov already consume 2 cycles before the hold loop
     if (us > 2) return us - 2;
     return 1;
-}
-
-static inline void send_bit(PIO pio, int sm, uint32_t count) {
-    // one DCC bit = two equal halves (keeps your smooth streaming)
-    pio_sm_put_blocking(pio, sm, count);
-    pio_sm_put_blocking(pio, sm, count);
-}
-
-static void send_byte(PIO pio, int sm, uint8_t b,
-                      uint32_t one_count, uint32_t zero_count) {
-    for (int i = 7; i >= 0; i--) {
-        if (b & (1 << i)) {
-            send_bit(pio, sm, one_count);
-        } else {
-            send_bit(pio, sm, zero_count);
-        }
-    }
 }
 
 int main() {
@@ -72,7 +53,8 @@ int main() {
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
     sm_config_set_sideset_pins(&c, PIN_A);
 
-    sm_config_set_clkdiv(&c, 125.0f); // 1 µs per cycle
+    // 125 MHz / 125 = 1 MHz, so 1 PIO cycle ≈ 1 µs
+    sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
     pio_sm_set_enabled(pio, sm, true);
@@ -80,31 +62,20 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    uint8_t checksum = LOCO_ADDR ^ DCC_DATA;
-
-    printf("Sending DCC packet addr=%d data=%d checksum=%d\n",
-           LOCO_ADDR, DCC_DATA, checksum);
+    printf("Running DCC-style PIO test: one=%u zero=%u\n", one_count, zero_count);
 
     while (1) {
-        // --- PREAMBLE (same as your old clean code) ---
+        // long preamble of 1s
         for (int i = 0; i < 200; i++) {
-            send_bit(pio, sm, one_count);
+            pio_sm_put_blocking(pio, sm, one_count);   // 01 half
+            pio_sm_put_blocking(pio, sm, one_count);   // 10 half
         }
 
-        // --- ADDRESS ---
-        send_bit(pio, sm, zero_count);
-        send_byte(pio, sm, LOCO_ADDR, one_count, zero_count);
-
-        // --- DATA ---
-        send_bit(pio, sm, zero_count);
-        send_byte(pio, sm, DCC_DATA, one_count, zero_count);
-
-        // --- CHECKSUM ---
-        send_bit(pio, sm, zero_count);
-        send_byte(pio, sm, checksum, one_count, zero_count);
-
-        // --- END BIT ---
-        send_bit(pio, sm, one_count);
+        // a few 0s
+        for (int i = 0; i < 20; i++) {
+            pio_sm_put_blocking(pio, sm, zero_count);  // 01 half
+            pio_sm_put_blocking(pio, sm, zero_count);  // 10 half
+        }
     }
 
     return 0;
