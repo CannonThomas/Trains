@@ -9,10 +9,9 @@
 #include "hardware/pio.h"
 #include "dcc_wave.pio.h"
 
-#define PIN_ENB 18   // red  -> ENB
-#define PIN_A   23   // blue -> IN3
-#define PIN_B   24   // white -> IN1
-#define PIN_ENA 25   // brown -> ENA
+#define PIN_EN 18
+#define PIN_A  23   // IN2
+#define PIN_B  24   // IN1
 
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 116
@@ -20,9 +19,7 @@
 #define LOCO_ADDR 3
 #define DCC_INST_128 0x3F
 
-static struct gpiod_line *ena_line = NULL;
-static struct gpiod_line *enb_line = NULL;
-
+static struct gpiod_line *en_line = NULL;
 static uint8_t speed_byte = 0x80;
 static bool track_on = false;
 
@@ -69,15 +66,13 @@ static void send_packet(PIO pio, int sm,
 }
 
 static void track_enable(PIO pio, int sm) {
-    gpiod_line_set_value(ena_line, 1);
-    gpiod_line_set_value(enb_line, 1);
+    gpiod_line_set_value(en_line, 1);
     pio_sm_set_enabled(pio, sm, true);
     track_on = true;
 }
 
 static void track_disable(PIO pio, int sm) {
-    gpiod_line_set_value(ena_line, 0);
-    gpiod_line_set_value(enb_line, 0);
+    gpiod_line_set_value(en_line, 0);
     pio_sm_set_enabled(pio, sm, false);
     track_on = false;
 }
@@ -100,7 +95,7 @@ static void handle_cmd(PIO pio, int sm) {
     if (line[0] == 'S' || line[0] == 's') {
         speed_byte = 0x80;
         track_disable(pio, sm);
-        printf("STOP | ENA/ENB OFF | PIO OFF\n");
+        printf("STOP | ENA OFF | PIO OFF\n");
         fflush(stdout);
         return;
     }
@@ -138,20 +133,13 @@ int main() {
         return 1;
     }
 
-    enb_line = gpiod_chip_get_line(chip, PIN_ENB);
-    ena_line = gpiod_chip_get_line(chip, PIN_ENA);
-
-    if (!ena_line || !enb_line) {
-        printf("Failed to get ENA/ENB lines\n");
+    en_line = gpiod_chip_get_line(chip, PIN_EN);
+    if (!en_line) {
+        printf("Failed to get ENA line\n");
         return 1;
     }
 
-    if (gpiod_line_request_output(enb_line, "dcc_enb", 0) < 0) {
-        printf("Failed to request ENB\n");
-        return 1;
-    }
-
-    if (gpiod_line_request_output(ena_line, "dcc_ena", 0) < 0) {
+    if (gpiod_line_request_output(en_line, "dcc_enable", 0) < 0) {
         printf("Failed to request ENA\n");
         return 1;
     }
@@ -160,12 +148,16 @@ int main() {
     int sm = pio_claim_unused_sm(pio, true);
     uint offset = pio_add_program(pio, &dcc_wave_program);
 
-    pio_gpio_init(pio, PIN_A);
-    pio_gpio_init(pio, PIN_B);
+    pio_gpio_init(pio, PIN_A); // GPIO23 / IN2
+    pio_gpio_init(pio, PIN_B); // GPIO24 / IN1
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
+
+    // side 0b01 = GPIO23 HIGH / GPIO24 LOW
+    // side 0b10 = GPIO23 LOW  / GPIO24 HIGH
     sm_config_set_sideset_pins(&c, PIN_A);
+
     sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
@@ -174,8 +166,8 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("DCC ready with exact test pins\n");
-    printf("GPIO18=ENB, GPIO23=IN3, GPIO24=IN1, GPIO25=ENA\n");
+    printf("DCC ready\n");
+    printf("GPIO18=ENA, GPIO23=IN2, GPIO24=IN1\n");
     printf("Commands: F <speed>, R <speed>, S\n");
 
     while (1) {
