@@ -135,12 +135,12 @@ int main() {
 
     en_line = gpiod_chip_get_line(chip, PIN_EN);
     if (!en_line) {
-        printf("Failed to get ENA line\n");
+        printf("Failed to get EN line\n");
         return 1;
     }
 
     if (gpiod_line_request_output(en_line, "dcc_enable", 0) < 0) {
-        printf("Failed to request ENA\n");
+        printf("Failed to request EN line\n");
         return 1;
     }
 
@@ -153,11 +153,7 @@ int main() {
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
-
-    // side 0b01 = GPIO23 HIGH / GPIO24 LOW
-    // side 0b10 = GPIO23 LOW  / GPIO24 HIGH
     sm_config_set_sideset_pins(&c, PIN_A);
-
     sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
