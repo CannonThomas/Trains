@@ -17,10 +17,12 @@
 #define DCC_ZERO_US 116
 
 #define LOCO_ADDR 3
-#define DCC_DATA  104
-#define DCC_CHECKSUM (LOCO_ADDR ^ DCC_DATA)
 
-#define MAX_HALVES 512
+#define DCC_INST_128 0x3F
+#define DCC_SPEED    0x94   // forward speed 20
+#define DCC_CHECKSUM (LOCO_ADDR ^ DCC_INST_128 ^ DCC_SPEED)
+
+#define MAX_HALVES 1024
 
 static uint32_t wave[MAX_HALVES];
 static int wave_count = 0;
@@ -46,7 +48,8 @@ static void add_byte(uint8_t b) {
 static void build_packet(void) {
     wave_count = 0;
 
-    for (int i = 0; i < 200; i++) {
+    // Preamble
+    for (int i = 0; i < 20; i++) {
         add_bit(1);
     }
 
@@ -54,7 +57,10 @@ static void build_packet(void) {
     add_byte(LOCO_ADDR);
 
     add_bit(0);
-    add_byte(DCC_DATA);
+    add_byte(DCC_INST_128);
+
+    add_bit(0);
+    add_byte(DCC_SPEED);
 
     add_bit(0);
     add_byte(DCC_CHECKSUM);
@@ -74,17 +80,7 @@ int main() {
     set_realtime_priority();
 
     struct gpiod_chip *chip = gpiod_chip_open("/dev/gpiochip0");
-    if (!chip) {
-        printf("Failed to open gpiochip0\n");
-        return 1;
-    }
-
     struct gpiod_line *en_line = gpiod_chip_get_line(chip, PIN_EN);
-    if (!en_line) {
-        printf("Failed to get EN line\n");
-        return 1;
-    }
-
     gpiod_line_request_output(en_line, "dcc", 1);
 
     PIO pio = pio0;
@@ -93,12 +89,11 @@ int main() {
 
     pio_gpio_init(pio, PIN_A);
     pio_gpio_init(pio, PIN_B);
-
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
 
-    // IMPORTANT: use SET pins, not side-set pins
+    // SET pins (not side-set)
     sm_config_set_set_pins(&c, PIN_A, 2);
 
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
@@ -109,11 +104,7 @@ int main() {
 
     build_packet();
 
-    printf("DCC packet stream\n");
-    printf("Address: %d\n", LOCO_ADDR);
-    printf("Command: %d / 0x%02X\n", DCC_DATA, DCC_DATA);
-    printf("Checksum: %d / 0x%02X\n", DCC_CHECKSUM, DCC_CHECKSUM);
-    printf("Half-cycles: %d\n", wave_count);
+    printf("Sending DCC: 03 3F 94 A8\n");
 
     while (1) {
         for (int i = 0; i < wave_count; i++) {

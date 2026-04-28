@@ -1,14 +1,15 @@
 .program dcc_wave
-.side_set 2
 
 .wrap_target
-    pull block      side 0b10
-    mov x, osr      side 0b10
+    pull block
+    set pins, 0b01      ; GPIO23 HIGH, GPIO24 LOW
+    mov x, osr
 high_loop:
-    jmp x-- high_loop side 0b10
+    jmp x-- high_loop
 
-    pull block      side 0b01
-    mov x, osr      side 0b01
+    pull block
+    set pins, 0b10      ; GPIO23 LOW, GPIO24 HIGH
+    mov x, osr
 low_loop:
-    jmp x-- low_loop side 0b01
+    jmp x-- low_loop
 .wrap
