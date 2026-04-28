@@ -10,8 +10,8 @@
 #include "dcc_wave.pio.h"
 
 #define PIN_EN 18
-#define PIN_A  23
-#define PIN_B  24
+#define PIN_A  23   // IN1
+#define PIN_B  24   // IN2
 
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 116
@@ -30,6 +30,7 @@ static inline uint32_t pio_count_from_us(uint32_t us) {
 static inline void send_bit(PIO pio, int sm, int bit,
                             uint32_t one_count,
                             uint32_t zero_count) {
+
     uint32_t count = bit ? one_count : zero_count;
 
     pio_sm_put_blocking(pio, sm, count);
@@ -39,6 +40,7 @@ static inline void send_bit(PIO pio, int sm, int bit,
 static void send_byte(PIO pio, int sm, uint8_t b,
                       uint32_t one_count,
                       uint32_t zero_count) {
+
     for (int i = 7; i >= 0; i--) {
         send_bit(pio, sm, (b >> i) & 1, one_count, zero_count);
     }
@@ -106,6 +108,7 @@ static void handle_cmd(PIO pio, int sm) {
     char dir;
     int speed;
 
+    // STOP
     if (line[0] == 'S') {
         speed_byte = 0x80;
         track_disable(pio, sm);
@@ -113,6 +116,7 @@ static void handle_cmd(PIO pio, int sm) {
         return;
     }
 
+    // FORWARD / REVERSE
     if (sscanf(line, " %c %d", &dir, &speed) == 2) {
 
         if (speed < 2) speed = 2;
@@ -137,7 +141,17 @@ int main() {
     setvbuf(stdout, NULL, _IONBF, 0);
 
     struct gpiod_chip *chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        printf("Failed to open gpiochip0\n");
+        return 1;
+    }
+
     en_line = gpiod_chip_get_line(chip, PIN_EN);
+    if (!en_line) {
+        printf("Failed to get EN line\n");
+        return 1;
+    }
+
     gpiod_line_request_output(en_line, "dcc", 0);
 
     PIO pio = pio0;
@@ -149,7 +163,10 @@ int main() {
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
-    sm_config_set_sideset_pins(&c, PIN_A);
+
+    // 🔥 IMPORTANT: use SET pins (NOT side-set)
+    sm_config_set_set_pins(&c, PIN_A, 2);
+
     sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
