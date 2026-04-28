@@ -164,8 +164,8 @@ int main() {
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
 
-    // 🔥 IMPORTANT: use SET pins (NOT side-set)
-    sm_config_set_set_pins(&c, PIN_A, 2);
+    // 🔥 SIDE-SET controls polarity (cleanest signal)
+    sm_config_set_sideset_pins(&c, PIN_A);
 
     sm_config_set_clkdiv(&c, 125.0f);
 
