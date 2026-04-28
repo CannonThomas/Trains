@@ -9,10 +9,10 @@
 #include "hardware/pio.h"
 #include "dcc_wave.pio.h"
 
-#define PIN_ENB 18   // ENB
-#define PIN_A   23   // IN3
-#define PIN_B   24   // IN1
-#define PIN_ENA 25   // ENA
+#define PIN_ENB 18   // red  -> ENB
+#define PIN_A   23   // blue -> IN3
+#define PIN_B   24   // white -> IN1
+#define PIN_ENA 25   // brown -> ENA
 
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 116
@@ -34,7 +34,6 @@ static inline void send_bit(PIO pio, int sm, int bit,
                             uint32_t one_count,
                             uint32_t zero_count) {
     uint32_t count = bit ? one_count : zero_count;
-
     pio_sm_put_blocking(pio, sm, count);
     pio_sm_put_blocking(pio, sm, count);
 }
@@ -101,7 +100,7 @@ static void handle_cmd(PIO pio, int sm) {
     if (line[0] == 'S' || line[0] == 's') {
         speed_byte = 0x80;
         track_disable(pio, sm);
-        printf("STOP | ENA OFF | ENB OFF | PIO OFF\n");
+        printf("STOP | ENA/ENB OFF | PIO OFF\n");
         fflush(stdout);
         return;
     }
@@ -161,16 +160,12 @@ int main() {
     int sm = pio_claim_unused_sm(pio, true);
     uint offset = pio_add_program(pio, &dcc_wave_program);
 
-    pio_gpio_init(pio, PIN_A); // GPIO23 / IN3
-    pio_gpio_init(pio, PIN_B); // GPIO24 / IN1
-
+    pio_gpio_init(pio, PIN_A);
+    pio_gpio_init(pio, PIN_B);
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
-
-    // GPIO23 and GPIO24 are complementary side-set outputs
     sm_config_set_sideset_pins(&c, PIN_A);
-
     sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
@@ -179,7 +174,7 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("DCC ready with new wiring\n");
+    printf("DCC ready with exact test pins\n");
     printf("GPIO18=ENB, GPIO23=IN3, GPIO24=IN1, GPIO25=ENA\n");
     printf("Commands: F <speed>, R <speed>, S\n");
 
