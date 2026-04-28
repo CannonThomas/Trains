@@ -15,52 +15,45 @@
 #define DCC_ZERO_US 116
 
 #define LOCO_ADDR 3
-#define DCC_DATA  104   // your original forward command
+#define DCC_DATA  104
+
+#define MAX_HALVES 65536
+#define PACKET_REPEATS 80
+
+static uint32_t wavebuf[MAX_HALVES];
+static int wavecount = 0;
 
 static inline uint32_t pio_count_from_us(uint32_t us) {
-    if (us > 2) return us - 2;
-    return 1;
+    return (us > 2) ? (us - 2) : 1;
 }
 
-static inline void send_bit(PIO pio, int sm, int bit,
-                            uint32_t one_count, uint32_t zero_count) {
-    uint32_t count = bit ? one_count : zero_count;
-
-    // one DCC bit = two equal half-cycles
-    pio_sm_put_blocking(pio, sm, count);
-    pio_sm_put_blocking(pio, sm, count);
+static void add_bit(int bit) {
+    uint32_t count = pio_count_from_us(bit ? DCC_ONE_US : DCC_ZERO_US);
+    wavebuf[wavecount++] = count;
+    wavebuf[wavecount++] = count;
 }
 
-static void send_byte(PIO pio, int sm, uint8_t byte,
-                      uint32_t one_count, uint32_t zero_count) {
+static void add_byte(uint8_t b) {
     for (int i = 7; i >= 0; i--) {
-        send_bit(pio, sm, (byte >> i) & 1, one_count, zero_count);
+        add_bit((b >> i) & 1);
     }
 }
 
-static void send_dcc_packet(PIO pio, int sm,
-                            uint32_t one_count, uint32_t zero_count) {
+static void add_packet(void) {
     uint8_t checksum = LOCO_ADDR ^ DCC_DATA;
 
-    // Long preamble, same style as your clean waveform
-    for (int i = 0; i < 200; i++) {
-        send_bit(pio, sm, 1, one_count, zero_count);
-    }
+    for (int i = 0; i < 200; i++) add_bit(1);
 
-    // Start + Address
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, LOCO_ADDR, one_count, zero_count);
+    add_bit(0);
+    add_byte(LOCO_ADDR);
 
-    // Start + Command
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, DCC_DATA, one_count, zero_count);
+    add_bit(0);
+    add_byte(DCC_DATA);
 
-    // Start + Checksum
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, checksum, one_count, zero_count);
+    add_bit(0);
+    add_byte(checksum);
 
-    // End bit
-    send_bit(pio, sm, 1, one_count, zero_count);
+    add_bit(1);
 }
 
 int main() {
@@ -89,14 +82,18 @@ int main() {
     pio_sm_init(pio, sm, offset, &c);
     pio_sm_set_enabled(pio, sm, true);
 
-    uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
-    uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
+    wavecount = 0;
+    for (int i = 0; i < PACKET_REPEATS; i++) {
+        add_packet();
+    }
 
-    printf("Sending DCC packet: addr=%d data=%d checksum=%d\n",
-           LOCO_ADDR, DCC_DATA, LOCO_ADDR ^ DCC_DATA);
+    printf("Streaming DCC buffer: addr=%d data=%d checksum=%d halves=%d\n",
+           LOCO_ADDR, DCC_DATA, LOCO_ADDR ^ DCC_DATA, wavecount);
 
     while (1) {
-        send_dcc_packet(pio, sm, one_count, zero_count);
+        for (int i = 0; i < wavecount; i++) {
+            pio_sm_put_blocking(pio, sm, wavebuf[i]);
+        }
     }
 
     return 0;
