@@ -9,9 +9,10 @@
 #include "hardware/pio.h"
 #include "dcc_wave.pio.h"
 
-#define PIN_EN 18
-#define PIN_A  23
-#define PIN_B  24
+#define PIN_ENB 18   // ENB
+#define PIN_A   23   // IN3
+#define PIN_B   24   // IN1
+#define PIN_ENA 25   // ENA
 
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 116
@@ -19,11 +20,9 @@
 #define LOCO_ADDR 3
 #define DCC_INST_128 0x3F
 
-#define SPEED_20 20
-#define SPEED_40 40
-#define SPEED_60 60
+static struct gpiod_line *ena_line = NULL;
+static struct gpiod_line *enb_line = NULL;
 
-static struct gpiod_line *en_line = NULL;
 static uint8_t speed_byte = 0x80;
 static bool track_on = false;
 
@@ -35,6 +34,7 @@ static inline void send_bit(PIO pio, int sm, int bit,
                             uint32_t one_count,
                             uint32_t zero_count) {
     uint32_t count = bit ? one_count : zero_count;
+
     pio_sm_put_blocking(pio, sm, count);
     pio_sm_put_blocking(pio, sm, count);
 }
@@ -69,41 +69,16 @@ static void send_packet(PIO pio, int sm,
     send_bit(pio, sm, 1, one_count, zero_count);
 }
 
-static uint8_t make_speed_byte(char dir, int speed) {
-    if (speed < 2) speed = 2;
-    if (speed > 127) speed = 127;
-
-    if (dir == 'F' || dir == 'f') {
-        return 0x80 | speed;
-    }
-
-    if (dir == 'R' || dir == 'r') {
-        return speed;
-    }
-
-    return 0x80;
-}
-
-static void print_packet(const char *label) {
-    uint8_t checksum = LOCO_ADDR ^ DCC_INST_128 ^ speed_byte;
-
-    printf("%s | packet %02X %02X %02X %02X\n",
-           label,
-           LOCO_ADDR,
-           DCC_INST_128,
-           speed_byte,
-           checksum);
-    fflush(stdout);
-}
-
 static void track_enable(PIO pio, int sm) {
-    gpiod_line_set_value(en_line, 1);
+    gpiod_line_set_value(ena_line, 1);
+    gpiod_line_set_value(enb_line, 1);
     pio_sm_set_enabled(pio, sm, true);
     track_on = true;
 }
 
 static void track_disable(PIO pio, int sm) {
-    gpiod_line_set_value(en_line, 0);
+    gpiod_line_set_value(ena_line, 0);
+    gpiod_line_set_value(enb_line, 0);
     pio_sm_set_enabled(pio, sm, false);
     track_on = false;
 }
@@ -124,27 +99,33 @@ static void handle_cmd(PIO pio, int sm) {
     int speed;
 
     if (line[0] == 'S' || line[0] == 's') {
-        speed_byte = 0x80; // exact stop packet: 03 3F 80 BC
-        print_packet("STOP");
+        speed_byte = 0x80;
         track_disable(pio, sm);
-        printf("ENA OFF | PIO OFF\n");
+        printf("STOP | ENA OFF | ENB OFF | PIO OFF\n");
         fflush(stdout);
         return;
     }
 
     if (sscanf(line, " %c %d", &dir, &speed) == 2) {
-        if (dir == 'F' || dir == 'f' || dir == 'R' || dir == 'r') {
-            speed_byte = make_speed_byte(dir, speed);
+        if (speed < 2) speed = 2;
+        if (speed > 127) speed = 127;
 
-            if (dir == 'F' || dir == 'f') {
-                printf("FORWARD %d\n", speed);
-            } else {
-                printf("REVERSE %d\n", speed);
-            }
-
-            print_packet("RUN");
+        if (dir == 'F' || dir == 'f') {
+            speed_byte = 0x80 | speed;
+            printf("FORWARD %d | packet %02X %02X %02X %02X\n",
+                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
+                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
             track_enable(pio, sm);
         }
+        else if (dir == 'R' || dir == 'r') {
+            speed_byte = speed;
+            printf("REVERSE %d | packet %02X %02X %02X %02X\n",
+                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
+                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
+            track_enable(pio, sm);
+        }
+
+        fflush(stdout);
     }
 }
 
@@ -158,14 +139,21 @@ int main() {
         return 1;
     }
 
-    en_line = gpiod_chip_get_line(chip, PIN_EN);
-    if (!en_line) {
-        printf("Failed to get EN line\n");
+    enb_line = gpiod_chip_get_line(chip, PIN_ENB);
+    ena_line = gpiod_chip_get_line(chip, PIN_ENA);
+
+    if (!ena_line || !enb_line) {
+        printf("Failed to get ENA/ENB lines\n");
         return 1;
     }
 
-    if (gpiod_line_request_output(en_line, "dcc_enable", 0) < 0) {
-        printf("Failed to request EN line\n");
+    if (gpiod_line_request_output(enb_line, "dcc_enb", 0) < 0) {
+        printf("Failed to request ENB\n");
+        return 1;
+    }
+
+    if (gpiod_line_request_output(ena_line, "dcc_ena", 0) < 0) {
+        printf("Failed to request ENA\n");
         return 1;
     }
 
@@ -173,12 +161,16 @@ int main() {
     int sm = pio_claim_unused_sm(pio, true);
     uint offset = pio_add_program(pio, &dcc_wave_program);
 
-    pio_gpio_init(pio, PIN_A);
-    pio_gpio_init(pio, PIN_B);
+    pio_gpio_init(pio, PIN_A); // GPIO23 / IN3
+    pio_gpio_init(pio, PIN_B); // GPIO24 / IN1
+
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
+
+    // GPIO23 and GPIO24 are complementary side-set outputs
     sm_config_set_sideset_pins(&c, PIN_A);
+
     sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
@@ -187,16 +179,9 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("Bachmann GP30 #6944 DCC ready\n");
+    printf("DCC ready with new wiring\n");
+    printf("GPIO18=ENB, GPIO23=IN3, GPIO24=IN1, GPIO25=ENA\n");
     printf("Commands: F <speed>, R <speed>, S\n");
-    printf("Known packets:\n");
-    printf("F 20 = 03 3F 94 A8\n");
-    printf("F 40 = 03 3F A8 94\n");
-    printf("F 60 = 03 3F BC 80\n");
-    printf("R 20 = 03 3F 14 28\n");
-    printf("R 40 = 03 3F 28 14\n");
-    printf("R 60 = 03 3F 3C 00\n");
-    printf("S    = 03 3F 80 BC\n");
 
     while (1) {
         handle_cmd(pio, sm);
