@@ -16,7 +16,9 @@
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 116
 
-#define LOCO_ADDR 3
+// Long address 0003 = C0 03
+#define ADDR_HI 0xC0
+#define ADDR_LO 0x03
 #define DCC_INST_128 0x3F
 
 static struct gpiod_line *en_line = NULL;
@@ -46,12 +48,15 @@ static void send_byte(PIO pio, int sm, uint8_t b,
 static void send_packet(PIO pio, int sm,
                         uint32_t one_count,
                         uint32_t zero_count) {
-    uint8_t checksum = LOCO_ADDR ^ DCC_INST_128 ^ speed_byte;
+    uint8_t checksum = ADDR_HI ^ ADDR_LO ^ DCC_INST_128 ^ speed_byte;
 
     for (int i = 0; i < 20; i++) send_bit(pio, sm, 1, one_count, zero_count);
 
     send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, LOCO_ADDR, one_count, zero_count);
+    send_byte(pio, sm, ADDR_HI, one_count, zero_count);
+
+    send_bit(pio, sm, 0, one_count, zero_count);
+    send_byte(pio, sm, ADDR_LO, one_count, zero_count);
 
     send_bit(pio, sm, 0, one_count, zero_count);
     send_byte(pio, sm, DCC_INST_128, one_count, zero_count);
@@ -95,7 +100,7 @@ static void handle_cmd(PIO pio, int sm) {
     if (line[0] == 'S' || line[0] == 's') {
         speed_byte = 0x80;
         track_disable(pio, sm);
-        printf("STOP | ENA OFF | PIO OFF\n");
+        printf("STOP | LONG packet C0 03 3F 80 7C | ENA OFF | PIO OFF\n");
         fflush(stdout);
         return;
     }
@@ -106,16 +111,16 @@ static void handle_cmd(PIO pio, int sm) {
 
         if (dir == 'F' || dir == 'f') {
             speed_byte = 0x80 | speed;
-            printf("FORWARD %d | packet %02X %02X %02X %02X\n",
-                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
-                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
+            printf("FORWARD %d | LONG packet %02X %02X %02X %02X %02X\n",
+                   speed, ADDR_HI, ADDR_LO, DCC_INST_128, speed_byte,
+                   ADDR_HI ^ ADDR_LO ^ DCC_INST_128 ^ speed_byte);
             track_enable(pio, sm);
         }
         else if (dir == 'R' || dir == 'r') {
             speed_byte = speed;
-            printf("REVERSE %d | packet %02X %02X %02X %02X\n",
-                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
-                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
+            printf("REVERSE %d | LONG packet %02X %02X %02X %02X %02X\n",
+                   speed, ADDR_HI, ADDR_LO, DCC_INST_128, speed_byte,
+                   ADDR_HI ^ ADDR_LO ^ DCC_INST_128 ^ speed_byte);
             track_enable(pio, sm);
         }
 
@@ -135,12 +140,12 @@ int main() {
 
     en_line = gpiod_chip_get_line(chip, PIN_EN);
     if (!en_line) {
-        printf("Failed to get EN line\n");
+        printf("Failed to get ENA line\n");
         return 1;
     }
 
     if (gpiod_line_request_output(en_line, "dcc_enable", 0) < 0) {
-        printf("Failed to request EN line\n");
+        printf("Failed to request ENA\n");
         return 1;
     }
 
@@ -148,8 +153,8 @@ int main() {
     int sm = pio_claim_unused_sm(pio, true);
     uint offset = pio_add_program(pio, &dcc_wave_program);
 
-    pio_gpio_init(pio, PIN_A); // GPIO23 / IN2
-    pio_gpio_init(pio, PIN_B); // GPIO24 / IN1
+    pio_gpio_init(pio, PIN_A);
+    pio_gpio_init(pio, PIN_B);
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
@@ -162,9 +167,12 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("DCC ready\n");
+    printf("DCC LONG address 0003 test ready\n");
     printf("GPIO18=ENA, GPIO23=IN2, GPIO24=IN1\n");
     printf("Commands: F <speed>, R <speed>, S\n");
+    printf("F 60 = C0 03 3F BC 40\n");
+    printf("R 60 = C0 03 3F 3C C0\n");
+    printf("S    = C0 03 3F 80 7C\n");
 
     while (1) {
         handle_cmd(pio, sm);
