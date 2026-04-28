@@ -19,55 +19,60 @@
 #define LOCO_ADDR 3
 #define DCC_INST_128 0x3F
 
-#define MAX_HALVES 8192
-
-static uint32_t wave[MAX_HALVES];
-static int wave_count = 0;
-
-static uint8_t speed_byte = 0x80;
+static struct gpiod_line *en_line = NULL;
+static uint8_t speed_byte = 0x80;   // STOP
 static bool track_on = false;
-
-static struct gpiod_line *en_line;
 
 static inline uint32_t pio_count_from_us(uint32_t us) {
     return (us > 2) ? (us - 2) : 1;
 }
 
-static inline void add_bit(int bit) {
-    uint32_t count = bit ? pio_count_from_us(DCC_ONE_US)
-                         : pio_count_from_us(DCC_ZERO_US);
+static inline void send_bit(PIO pio, int sm, int bit,
+                            uint32_t one_count,
+                            uint32_t zero_count) {
+    uint32_t count = bit ? one_count : zero_count;
 
-    if (wave_count + 2 < MAX_HALVES) {
-        wave[wave_count++] = count;
-        wave[wave_count++] = count;
-    }
+    pio_sm_put_blocking(pio, sm, count);
+    pio_sm_put_blocking(pio, sm, count);
 }
 
-static void add_byte(uint8_t b) {
+static void send_byte(PIO pio, int sm, uint8_t b,
+                      uint32_t one_count,
+                      uint32_t zero_count) {
     for (int i = 7; i >= 0; i--) {
-        add_bit((b >> i) & 1);
+        send_bit(pio, sm, (b >> i) & 1, one_count, zero_count);
     }
 }
 
-static void build_stream(void) {
-    wave_count = 0;
+static void send_packet(PIO pio, int sm,
+                        uint32_t one_count,
+                        uint32_t zero_count) {
 
-    for (int r = 0; r < 12; r++) {
+    uint8_t checksum = LOCO_ADDR ^ DCC_INST_128 ^ speed_byte;
 
-        uint8_t checksum = LOCO_ADDR ^ DCC_INST_128 ^ speed_byte;
-
-        // PREAMBLE
-        for (int i = 0; i < 20; i++) add_bit(1);
-
-        add_bit(0); add_byte(LOCO_ADDR);
-        add_bit(0); add_byte(DCC_INST_128);
-        add_bit(0); add_byte(speed_byte);
-        add_bit(0); add_byte(checksum);
-        add_bit(1);
+    // PREAMBLE
+    for (int i = 0; i < 20; i++) {
+        send_bit(pio, sm, 1, one_count, zero_count);
     }
 
-    printf("Stream rebuilt | speed=0x%02X | halves=%d\n", speed_byte, wave_count);
-    fflush(stdout);
+    // ADDRESS
+    send_bit(pio, sm, 0, one_count, zero_count);
+    send_byte(pio, sm, LOCO_ADDR, one_count, zero_count);
+
+    // INSTRUCTION
+    send_bit(pio, sm, 0, one_count, zero_count);
+    send_byte(pio, sm, DCC_INST_128, one_count, zero_count);
+
+    // SPEED
+    send_bit(pio, sm, 0, one_count, zero_count);
+    send_byte(pio, sm, speed_byte, one_count, zero_count);
+
+    // CHECKSUM
+    send_bit(pio, sm, 0, one_count, zero_count);
+    send_byte(pio, sm, checksum, one_count, zero_count);
+
+    // END
+    send_bit(pio, sm, 1, one_count, zero_count);
 }
 
 static void track_enable(PIO pio, int sm) {
@@ -83,6 +88,7 @@ static void track_disable(PIO pio, int sm) {
 }
 
 static void handle_cmd(PIO pio, int sm) {
+
     fd_set rfds;
     struct timeval tv = {0,0};
 
@@ -102,7 +108,6 @@ static void handle_cmd(PIO pio, int sm) {
 
     if (line[0] == 'S') {
         speed_byte = 0x80;
-        build_stream();
         track_disable(pio, sm);
         printf("STOP\n");
         return;
@@ -122,7 +127,6 @@ static void handle_cmd(PIO pio, int sm) {
             printf("REVERSE %d\n", speed);
         }
 
-        build_stream();
         track_enable(pio, sm);
     }
 }
@@ -150,7 +154,8 @@ int main() {
 
     pio_sm_init(pio, sm, offset, &c);
 
-    build_stream();
+    uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
+    uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
     printf("READY: F <speed>, R <speed>, S\n");
 
@@ -159,14 +164,7 @@ int main() {
         handle_cmd(pio, sm);
 
         if (track_on) {
-
-            // KEEP FIFO FULL (critical)
-            while (!pio_sm_is_tx_fifo_full(pio, sm)) {
-                for (int i = 0; i < wave_count; i++) {
-                    pio_sm_put(pio, sm, wave[i]);
-                }
-            }
-
+            send_packet(pio, sm, one_count, zero_count);
         } else {
             usleep(1000);
         }
