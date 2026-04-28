@@ -1,0 +1,14 @@
+.program dcc_wave
+.side_set 2
+
+.wrap_target
+    pull block      side 0b01
+    mov x, osr      side 0b01
+hold_a:
+    jmp x-- hold_a  side 0b01
+
+    pull block      side 0b10
+    mov x, osr      side 0b10
+hold_b:
+    jmp x-- hold_b  side 0b10
+.wrap
