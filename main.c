@@ -12,9 +12,11 @@
 #define ENA 18
 #define ENB 25
 
-#define IN2 23
+// Turntable channel from PDF
 #define IN1 24
+#define IN2 23
 
+// Main track channel from PDF
 #define IN3 22
 #define IN4 27
 
@@ -42,24 +44,32 @@ static void set_enable(bool on)
     lgGpioWrite(h, ENB, on ? 1 : 0);
 }
 
+/*
+ * PDF mapping:
+ * IN1/IN2 = turntable high/low
+ * IN3/IN4 = main track high/low
+ *
+ * So main track DCC must be IN3 opposite IN4.
+ * We mirror IN1/IN2 too only in case your physical rails use both outputs.
+ */
 static void set_polarity(int state)
 {
     if (state)
     {
-        // Polarity A
+        // State A: high side pins ON, low side pins OFF
         lgGpioWrite(h, IN1, 1);
-        lgGpioWrite(h, IN3, 1);
-
         lgGpioWrite(h, IN2, 0);
+
+        lgGpioWrite(h, IN3, 1);
         lgGpioWrite(h, IN4, 0);
     }
     else
     {
-        // Polarity B
+        // State B: high side pins OFF, low side pins ON
         lgGpioWrite(h, IN1, 0);
-        lgGpioWrite(h, IN3, 0);
-
         lgGpioWrite(h, IN2, 1);
+
+        lgGpioWrite(h, IN3, 0);
         lgGpioWrite(h, IN4, 1);
     }
 }
@@ -189,7 +199,8 @@ int main(void)
 
     printf("4-input L298 DCC test ready\n");
     printf("ENA=18 ENB=25\n");
-    printf("IN1=24 IN2=23 IN3=22 IN4=27\n");
+    printf("Turntable: IN1=24 IN2=23\n");
+    printf("Main track: IN3=22 IN4=27\n");
     printf("Commands: f r s x q\n");
 
     while (running)
