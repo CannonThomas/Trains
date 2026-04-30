@@ -1,15 +1,27 @@
+cd ~/Trains/pi5_pio_dcc
+
+cat > dcc_wave.pio <<'EOF'
 .program dcc_wave
+.side_set 2
+
+; GPIO23 = side bit 0
+; GPIO24 = side bit 1
+;
+; side 0b01 -> GPIO23=1 GPIO24=0
+; side 0b10 -> GPIO23=0 GPIO24=1
+;
+; The polarity is applied with side-set at the START of the instruction,
+; not later with "set pins".
 
 .wrap_target
-    pull block
-    mov x, osr
-    set pins, 1
+    pull block      side 0b01
+    mov x, osr      side 0b01
 hold_a:
-    jmp x-- hold_a
+    jmp x-- hold_a  side 0b01
 
-    pull block
-    mov x, osr
-    set pins, 2
+    pull block      side 0b10
+    mov x, osr      side 0b10
 hold_b:
-    jmp x-- hold_b
+    jmp x-- hold_b  side 0b10
 .wrap
+EOF

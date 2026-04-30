@@ -145,17 +145,23 @@ static void handle_sigint(int sig)
 
 static void dcc_wave_init(PIO pio, uint sm, uint offset, uint pin_base)
 {
+    // GPIO23 and GPIO24
     pio_gpio_init(pio, pin_base);
     pio_gpio_init(pio, pin_base + 1);
 
+    // Make GPIO23/GPIO24 outputs
     pio_sm_set_consecutive_pindirs(pio, sm, pin_base, 2, true);
 
+    // Use pioasm-generated config
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
 
-    // Our PIO uses "set pins, 1" and "set pins, 2"
-    sm_config_set_set_pins(&c, pin_base, 2);
+    // IMPORTANT:
+    // This PIO program uses side-set, not set pins.
+    // side bit0 -> GPIO23
+    // side bit1 -> GPIO24
+    sm_config_set_sideset_pins(&c, pin_base);
 
-    // 125 MHz / 125 = about 1 MHz, 1 cycle ~= 1 us
+    // 125 MHz / 125 = about 1 MHz, so one PIO cycle ~= 1 us
     sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
