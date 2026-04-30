@@ -32,30 +32,35 @@ static int txlen = 0;
 
 static uint32_t count_from_us(uint32_t us)
 {
-    return us > 3 ? us - 3 : 1;
+    // PIO loop has overhead, so subtract a little.
+    return us > 4 ? us - 4 : 1;
 }
 
 static void add_half(uint32_t count)
 {
     if (txlen < MAX_HALVES)
+    {
         txbuf[txlen++] = count;
+    }
 }
 
 static void add_bit(int bit, uint32_t one_count, uint32_t zero_count)
 {
     uint32_t count = bit ? one_count : zero_count;
 
-    // PIO half 1: GPIO23 high, GPIO24 low
+    // First half: GPIO23=1 GPIO24=0
     add_half(count);
 
-    // PIO half 2: GPIO23 low, GPIO24 high
+    // Second half: GPIO23=0 GPIO24=1
     add_half(count);
 }
 
 static void add_byte(uint8_t b, uint32_t one_count, uint32_t zero_count)
 {
     for (int i = 7; i >= 0; i--)
+    {
         add_bit((b >> i) & 1, one_count, zero_count);
+    }
 }
 
 static void add_packet(uint8_t addr, uint8_t data,
@@ -64,9 +69,11 @@ static void add_packet(uint8_t addr, uint8_t data,
 {
     uint8_t checksum = addr ^ data;
 
-    // Match old group style: 12+ ones preamble
+    // Old group style: 12+ preamble ones
     for (int i = 0; i < 14; i++)
+    {
         add_bit(1, one_count, zero_count);
+    }
 
     add_bit(0, one_count, zero_count);
     add_byte(addr, one_count, zero_count);
@@ -111,14 +118,18 @@ int main(void)
         return 1;
     }
 
-    lgGpioClaimOutput(h, 0, ENB, 1);
+    if (lgGpioClaimOutput(h, 0, ENB, 1) < 0)
+    {
+        printf("Failed to claim ENB GPIO%d\n", ENB);
+        return 1;
+    }
 
     PIO pio = pio0;
     uint sm = pio_claim_unused_sm(pio, true);
-
-    pio_sm_config_xfer(pio, sm, PIO_DIR_TO_SM, sizeof(txbuf), 1);
+    printf("Claimed SM: %u\n", sm);
 
     uint offset = pio_add_program(pio, &dcc_wave_program);
+    printf("Loaded PIO program at offset: %u\n", offset);
 
     dcc_wave_program_init(pio, sm, offset, PIN_BASE);
 
@@ -127,11 +138,9 @@ int main(void)
 
     build_repeated_forward_buffer();
 
-    int bytes = txlen * sizeof(uint32_t);
-
     printf("RP1 PIO repeated DCC buffer test\n");
-    printf("GPIO24 -> IN3 main track high\n");
-    printf("GPIO23 -> IN4 main track low\n");
+    printf("GPIO23 -> first PIO pin\n");
+    printf("GPIO24 -> second PIO pin\n");
     printf("GPIO25 -> ENB\n");
     printf("Sending repeated forward packets: 03 63 60\n");
     printf("Half-cycles in buffer: %d\n", txlen);
@@ -139,7 +148,11 @@ int main(void)
 
     while (running)
     {
-        pio_sm_xfer_data(pio, sm, PIO_DIR_TO_SM, bytes, (uint8_t *)txbuf);
+        // Safer than pio_sm_xfer_data while debugging.
+        for (int i = 0; i < txlen && running; i++)
+        {
+            pio_sm_put_blocking(pio, sm, txbuf[i]);
+        }
     }
 
     lgGpioWrite(h, ENB, 0);

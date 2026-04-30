@@ -1,32 +1,29 @@
 // dcc_wave.pio.h
-// Modified from Raspberry Pi piolib PWM header style.
-// For Pi 5 RP1 PIO test: two-pin opposite-polarity DCC half-cycles.
+// Pi 5 RP1 PIO: two-pin opposite-polarity DCC half-cycle generator.
+// Uses SET PINS instead of sideset.
 
 #pragma once
 
-#if !PICO_NO_HARDWARE
-#include "hardware/pio.h"
-#endif
+#include "piolib.h"
 
 #define dcc_wave_wrap_target 0
-#define dcc_wave_wrap 5
+#define dcc_wave_wrap 7
 
 static const uint16_t dcc_wave_program_instructions[] = {
-    // Pull delay count for polarity A
-    0x9080, // 0: pull noblock        side 1
-    0xa027, // 1: mov  x, osr         side 1
-    0x0882, // 2: jmp  x--, 2         side 1
+    0x80a0, // 0: pull block
+    0xa027, // 1: mov  x, osr
+    0xe001, // 2: set  pins, 1   -> GPIO23=1 GPIO24=0
+    0x0043, // 3: jmp  x--, 3
 
-    // Pull delay count for polarity B
-    0x9000, // 3: pull noblock        side 2
-    0xa027, // 4: mov  x, osr         side 2
-    0x1005  // 5: jmp  x--, 5         side 2
+    0x80a0, // 4: pull block
+    0xa027, // 5: mov  x, osr
+    0xe002, // 6: set  pins, 2   -> GPIO23=0 GPIO24=1
+    0x0047  // 7: jmp  x--, 7
 };
 
-#if !PICO_NO_HARDWARE
 static const struct pio_program dcc_wave_program = {
     .instructions = dcc_wave_program_instructions,
-    .length = 6,
+    .length = 8,
     .origin = -1,
 };
 
@@ -37,10 +34,6 @@ static inline pio_sm_config dcc_wave_program_get_default_config(uint offset)
     sm_config_set_wrap(&c,
                        offset + dcc_wave_wrap_target,
                        offset + dcc_wave_wrap);
-
-    // 2 side-set bits, optional=true, pindirs=false.
-    // side 1 = binary 01, side 2 = binary 10.
-    sm_config_set_sideset(&c, 2, true, false);
 
     return c;
 }
@@ -55,11 +48,11 @@ static inline void dcc_wave_program_init(PIO pio, uint sm, uint offset, uint pin
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
 
-    sm_config_set_sideset_pins(&c, pin_base);
+    // SET PINS controls GPIO23/GPIO24
+    sm_config_set_set_pins(&c, pin_base, 2);
 
-    // 125 MHz / 125 = 1 MHz, so 1 PIO tick ~= 1 us.
+    // 125 MHz / 125 = 1 MHz, so delay loop is roughly microsecond scale.
     sm_config_set_clkdiv(&c, 125.0f);
 
     pio_sm_init(pio, sm, offset, &c);
 }
-#endif
