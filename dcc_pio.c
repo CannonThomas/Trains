@@ -14,12 +14,12 @@
 #define PIN_B  24   // IN1
 
 #define DCC_ONE_US   58
-#define DCC_ZERO_US 116
+#define DCC_ZERO_US 100   // matches old group method
 
 #define LOCO_ADDR 3
 
 static struct gpiod_line *en_line = NULL;
-static uint8_t data_byte = 0x60;   // STOP: 03 60 63
+static uint8_t data_byte = 0x60;   // STOP packet data
 static bool track_on = false;
 
 static inline uint32_t pio_count_from_us(uint32_t us) {
@@ -30,6 +30,7 @@ static inline void send_bit(PIO pio, int sm, int bit,
                             uint32_t one_count,
                             uint32_t zero_count) {
     uint32_t count = bit ? one_count : zero_count;
+
     pio_sm_put_blocking(pio, sm, count);
     pio_sm_put_blocking(pio, sm, count);
 }
@@ -47,7 +48,8 @@ static void send_packet(PIO pio, int sm,
                         uint32_t zero_count) {
     uint8_t checksum = LOCO_ADDR ^ data_byte;
 
-    for (int i = 0; i < 20; i++) {
+    // Old group used 12 preamble 1s: 8 + 4
+    for (int i = 0; i < 12; i++) {
         send_bit(pio, sm, 1, one_count, zero_count);
     }
 
@@ -82,39 +84,33 @@ static void handle_cmd(PIO pio, int sm) {
     FD_ZERO(&rfds);
     FD_SET(STDIN_FILENO, &rfds);
 
-    if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0) {
-        return;
-    }
+    if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0) return;
 
     char line[64];
-    if (!fgets(line, sizeof(line), stdin)) {
-        return;
+    if (!fgets(line, sizeof(line), stdin)) return;
+
+    if (line[0] == 'F' || line[0] == 'f') {
+        data_byte = 0x63;
+        track_enable(pio, sm);
+        printf("FORWARD | packet 03 63 60\n");
     }
-
-    char dir;
-
-    if (line[0] == 'S' || line[0] == 's') {
+    else if (line[0] == 'R' || line[0] == 'r') {
+        data_byte = 0x43;
+        track_enable(pio, sm);
+        printf("REVERSE | packet 03 43 40\n");
+    }
+    else if (line[0] == 'S' || line[0] == 's') {
         data_byte = 0x60;
         track_disable(pio, sm);
         printf("STOP | packet 03 60 63 | ENA OFF | PIO OFF\n");
-        fflush(stdout);
-        return;
+    }
+    else if (line[0] == 'I' || line[0] == 'i') {
+        data_byte = 0x60;
+        track_enable(pio, sm);
+        printf("IDLE/STOP PACKETS ON | packet 03 60 63\n");
     }
 
-    if (sscanf(line, " %c", &dir) == 1) {
-        if (dir == 'F' || dir == 'f') {
-            data_byte = 0x63;
-            printf("FORWARD | packet 03 63 60\n");
-            track_enable(pio, sm);
-        }
-        else if (dir == 'R' || dir == 'r') {
-            data_byte = 0x43;
-            printf("REVERSE | packet 03 43 40\n");
-            track_enable(pio, sm);
-        }
-
-        fflush(stdout);
-    }
+    fflush(stdout);
 }
 
 int main() {
@@ -142,8 +138,8 @@ int main() {
     int sm = pio_claim_unused_sm(pio, true);
     uint offset = pio_add_program(pio, &dcc_wave_program);
 
-    pio_gpio_init(pio, PIN_A); // GPIO23 / IN2
-    pio_gpio_init(pio, PIN_B); // GPIO24 / IN1
+    pio_gpio_init(pio, PIN_A);
+    pio_gpio_init(pio, PIN_B);
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
@@ -156,9 +152,13 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("DCC ready - simple packet mode\n");
+    printf("DCC ready - old group packet mode\n");
     printf("GPIO18=ENA, GPIO23=IN2, GPIO24=IN1\n");
-    printf("Commands: F, R, S\n");
+    printf("Commands: F, R, S, I\n");
+    printf("F = 03 63 60\n");
+    printf("R = 03 43 40\n");
+    printf("S = 03 60 63 with ENA OFF\n");
+    printf("I = 03 60 63 continuously with ENA ON\n");
 
     while (1) {
         handle_cmd(pio, sm);
