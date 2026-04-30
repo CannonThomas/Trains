@@ -17,10 +17,9 @@
 #define DCC_ZERO_US 116
 
 #define LOCO_ADDR 3
-#define DCC_INST_128 0x3F
 
 static struct gpiod_line *en_line = NULL;
-static uint8_t speed_byte = 0x80;
+static uint8_t data_byte = 0x60;   // STOP: 03 60 63
 static bool track_on = false;
 
 static inline uint32_t pio_count_from_us(uint32_t us) {
@@ -46,18 +45,17 @@ static void send_byte(PIO pio, int sm, uint8_t b,
 static void send_packet(PIO pio, int sm,
                         uint32_t one_count,
                         uint32_t zero_count) {
-    uint8_t checksum = LOCO_ADDR ^ DCC_INST_128 ^ speed_byte;
+    uint8_t checksum = LOCO_ADDR ^ data_byte;
 
-    for (int i = 0; i < 20; i++) send_bit(pio, sm, 1, one_count, zero_count);
+    for (int i = 0; i < 20; i++) {
+        send_bit(pio, sm, 1, one_count, zero_count);
+    }
 
     send_bit(pio, sm, 0, one_count, zero_count);
     send_byte(pio, sm, LOCO_ADDR, one_count, zero_count);
 
     send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, DCC_INST_128, one_count, zero_count);
-
-    send_bit(pio, sm, 0, one_count, zero_count);
-    send_byte(pio, sm, speed_byte, one_count, zero_count);
+    send_byte(pio, sm, data_byte, one_count, zero_count);
 
     send_bit(pio, sm, 0, one_count, zero_count);
     send_byte(pio, sm, checksum, one_count, zero_count);
@@ -84,38 +82,34 @@ static void handle_cmd(PIO pio, int sm) {
     FD_ZERO(&rfds);
     FD_SET(STDIN_FILENO, &rfds);
 
-    if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0) return;
+    if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0) {
+        return;
+    }
 
     char line[64];
-    if (!fgets(line, sizeof(line), stdin)) return;
+    if (!fgets(line, sizeof(line), stdin)) {
+        return;
+    }
 
     char dir;
-    int speed;
 
     if (line[0] == 'S' || line[0] == 's') {
-        speed_byte = 0x80;
+        data_byte = 0x60;
         track_disable(pio, sm);
-        printf("STOP | ENA OFF | PIO OFF\n");
+        printf("STOP | packet 03 60 63 | ENA OFF | PIO OFF\n");
         fflush(stdout);
         return;
     }
 
-    if (sscanf(line, " %c %d", &dir, &speed) == 2) {
-        if (speed < 2) speed = 2;
-        if (speed > 127) speed = 127;
-
+    if (sscanf(line, " %c", &dir) == 1) {
         if (dir == 'F' || dir == 'f') {
-            speed_byte = 0x80 | speed;
-            printf("FORWARD %d | packet %02X %02X %02X %02X\n",
-                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
-                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
+            data_byte = 0x63;
+            printf("FORWARD | packet 03 63 60\n");
             track_enable(pio, sm);
         }
         else if (dir == 'R' || dir == 'r') {
-            speed_byte = speed;
-            printf("REVERSE %d | packet %02X %02X %02X %02X\n",
-                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
-                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
+            data_byte = 0x43;
+            printf("REVERSE | packet 03 43 40\n");
             track_enable(pio, sm);
         }
 
@@ -162,9 +156,9 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("DCC ready\n");
+    printf("DCC ready - simple packet mode\n");
     printf("GPIO18=ENA, GPIO23=IN2, GPIO24=IN1\n");
-    printf("Commands: F <speed>, R <speed>, S\n");
+    printf("Commands: F, R, S\n");
 
     while (1) {
         handle_cmd(pio, sm);
