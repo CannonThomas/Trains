@@ -2,15 +2,13 @@
 .side_set 2
 
 .wrap_target
-pull block side 0b01
-mov x, osr side 0b01
+    pull block      side 0b10  ; GPIO23/IN2=0, GPIO24/IN1=1
+    mov x, osr      side 0b10
+hold_a:
+    jmp x-- hold_a  side 0b10
 
-high_loop:
-jmp x-- high_loop side 0b01
-
-pull block side 0b10
-mov x, osr side 0b10
-
-low_loop:
-jmp x-- low_loop side 0b10
+    pull block      side 0b01  ; GPIO23/IN2=1, GPIO24/IN1=0
+    mov x, osr      side 0b01
+hold_b:
+    jmp x-- hold_b  side 0b01
 .wrap
