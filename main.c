@@ -3,25 +3,22 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <signal.h>
-#include <time.h>
 #include <sys/select.h>
 #include <lgpio.h>
 
+#include "piolib.h"
+#include "dcc_wave.pio.h"
+
 #define GPIOCHIP 0
 
-#define ENA 18
 #define ENB 25
 
-// Turntable channel from PDF
-#define IN1 24
-#define IN2 23
-
-// Main track channel from PDF
-#define IN3 22
-#define IN4 27
+// PIO must use consecutive pins
+#define PIN_BASE 23
+#define IN4_GPIO 23
+#define IN3_GPIO 24
 
 #define LOCO_ADDR 3
-
 #define DCC_ONE_US 58
 #define DCC_ZERO_US 100
 
@@ -30,86 +27,52 @@ static volatile bool running = true;
 static bool track_on = false;
 static uint8_t data_byte = 0x60;
 
-static void delay_us(long us)
+static uint32_t count_from_us(uint32_t us)
 {
-    struct timespec ts;
-    ts.tv_sec = us / 1000000;
-    ts.tv_nsec = (us % 1000000) * 1000;
-    nanosleep(&ts, NULL);
+    return us > 3 ? us - 3 : 1;
 }
 
-static void set_enable(bool on)
+static void set_track(bool on)
 {
-    lgGpioWrite(h, ENA, on ? 1 : 0);
+    track_on = on;
     lgGpioWrite(h, ENB, on ? 1 : 0);
 }
 
-/*
- * PDF mapping:
- * IN1/IN2 = turntable high/low
- * IN3/IN4 = main track high/low
- *
- * So main track DCC must be IN3 opposite IN4.
- * We mirror IN1/IN2 too only in case your physical rails use both outputs.
- */
-static void set_polarity(int state)
+static void send_bit(PIO pio, uint sm, int bit, uint32_t one_count, uint32_t zero_count)
 {
-    if (state)
-    {
-        // State A: high side pins ON, low side pins OFF
-        lgGpioWrite(h, IN1, 1);
-        lgGpioWrite(h, IN2, 0);
+    uint32_t count = bit ? one_count : zero_count;
 
-        lgGpioWrite(h, IN3, 1);
-        lgGpioWrite(h, IN4, 0);
-    }
-    else
-    {
-        // State B: high side pins OFF, low side pins ON
-        lgGpioWrite(h, IN1, 0);
-        lgGpioWrite(h, IN2, 1);
+    // First half: GPIO23 high / GPIO24 low
+    pio_sm_put_blocking(pio, sm, count);
 
-        lgGpioWrite(h, IN3, 0);
-        lgGpioWrite(h, IN4, 1);
-    }
+    // Second half: GPIO23 low / GPIO24 high
+    pio_sm_put_blocking(pio, sm, count);
 }
 
-static void send_bit(int bit)
-{
-    int us = bit ? DCC_ONE_US : DCC_ZERO_US;
-
-    set_polarity(0);
-    delay_us(us);
-
-    set_polarity(1);
-    delay_us(us);
-}
-
-static void send_byte(uint8_t b)
+static void send_byte(PIO pio, uint sm, uint8_t b, uint32_t one_count, uint32_t zero_count)
 {
     for (int i = 7; i >= 0; i--)
-    {
-        send_bit((b >> i) & 1);
-    }
+        send_bit(pio, sm, (b >> i) & 1, one_count, zero_count);
 }
 
-static void send_packet(uint8_t addr, uint8_t data)
+static void send_packet(PIO pio, uint sm, uint8_t addr, uint8_t data,
+                        uint32_t one_count, uint32_t zero_count)
 {
     uint8_t checksum = addr ^ data;
 
     for (int i = 0; i < 14; i++)
-        send_bit(1);
+        send_bit(pio, sm, 1, one_count, zero_count);
 
-    send_bit(0);
-    send_byte(addr);
+    send_bit(pio, sm, 0, one_count, zero_count);
+    send_byte(pio, sm, addr, one_count, zero_count);
 
-    send_bit(0);
-    send_byte(data);
+    send_bit(pio, sm, 0, one_count, zero_count);
+    send_byte(pio, sm, data, one_count, zero_count);
 
-    send_bit(0);
-    send_byte(checksum);
+    send_bit(pio, sm, 0, one_count, zero_count);
+    send_byte(pio, sm, checksum, one_count, zero_count);
 
-    send_bit(1);
+    send_bit(pio, sm, 1, one_count, zero_count);
 }
 
 static void handle_keyboard(void)
@@ -130,28 +93,24 @@ static void handle_keyboard(void)
     if (c == 'f' || c == 'F')
     {
         data_byte = 0x63;
-        track_on = true;
-        set_enable(true);
+        set_track(true);
         printf("\nFORWARD: 03 63 60\n");
     }
     else if (c == 'r' || c == 'R')
     {
         data_byte = 0x43;
-        track_on = true;
-        set_enable(true);
+        set_track(true);
         printf("\nREVERSE: 03 43 40\n");
     }
     else if (c == 's' || c == 'S')
     {
         data_byte = 0x60;
-        track_on = true;
-        set_enable(true);
+        set_track(true);
         printf("\nSTOP: 03 60 63\n");
     }
     else if (c == 'x' || c == 'X')
     {
-        track_on = false;
-        set_enable(false);
+        set_track(false);
         printf("\nTRACK OFF\n");
     }
     else if (c == 'q' || c == 'Q')
@@ -162,45 +121,38 @@ static void handle_keyboard(void)
     fflush(stdout);
 }
 
-static void cleanup(void)
-{
-    if (h >= 0)
-    {
-        set_enable(false);
-
-        lgGpioWrite(h, IN1, 0);
-        lgGpioWrite(h, IN2, 0);
-        lgGpioWrite(h, IN3, 0);
-        lgGpioWrite(h, IN4, 0);
-
-        lgGpiochipClose(h);
-    }
-}
-
 int main(void)
 {
     signal(SIGINT, SIG_DFL);
 
     h = lgGpiochipOpen(GPIOCHIP);
-
     if (h < 0)
     {
-        printf("Failed to open gpiochip\n");
+        printf("Failed to open lgpio chip\n");
         return 1;
     }
 
-    lgGpioClaimOutput(h, 0, ENA, 0);
     lgGpioClaimOutput(h, 0, ENB, 0);
 
-    lgGpioClaimOutput(h, 0, IN1, 0);
-    lgGpioClaimOutput(h, 0, IN2, 0);
-    lgGpioClaimOutput(h, 0, IN3, 0);
-    lgGpioClaimOutput(h, 0, IN4, 0);
+    PIO pio = pio0;
+    uint sm = pio_claim_unused_sm(pio, true);
 
-    printf("4-input L298 DCC test ready\n");
-    printf("ENA=18 ENB=25\n");
-    printf("Turntable: IN1=24 IN2=23\n");
-    printf("Main track: IN3=22 IN4=27\n");
+    pio_sm_config_xfer(pio, sm, PIO_DIR_TO_SM, 256, 1);
+
+    uint offset = pio_add_program(pio, &dcc_wave_program);
+
+    dcc_wave_program_init(pio, sm, offset, PIN_BASE);
+
+    pio_sm_clear_fifos(pio, sm);
+    pio_sm_set_enabled(pio, sm, true);
+
+    uint32_t one_count = count_from_us(DCC_ONE_US);
+    uint32_t zero_count = count_from_us(DCC_ZERO_US);
+
+    printf("RP1 PIO DCC ready\n");
+    printf("GPIO24 -> IN3 main track high\n");
+    printf("GPIO23 -> IN4 main track low\n");
+    printf("GPIO25 -> ENB\n");
     printf("Commands: f r s x q\n");
 
     while (running)
@@ -208,11 +160,13 @@ int main(void)
         handle_keyboard();
 
         if (track_on)
-            send_packet(LOCO_ADDR, data_byte);
+            send_packet(pio, sm, LOCO_ADDR, data_byte, one_count, zero_count);
         else
             usleep(1000);
     }
 
-    cleanup();
+    set_track(false);
+    lgGpiochipClose(h);
+
     return 0;
 }
