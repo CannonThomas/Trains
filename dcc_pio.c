@@ -10,8 +10,8 @@
 #include "dcc_wave.pio.h"
 
 #define PIN_EN 18
-#define PIN_A  23
-#define PIN_B  24
+#define PIN_A  23   // IN2
+#define PIN_B  24   // IN1
 
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 116
@@ -46,7 +46,6 @@ static void send_byte(PIO pio, int sm, uint8_t b,
 static void send_packet(PIO pio, int sm,
                         uint32_t one_count,
                         uint32_t zero_count) {
-
     uint8_t checksum = LOCO_ADDR ^ DCC_INST_128 ^ speed_byte;
 
     for (int i = 0; i < 20; i++) send_bit(pio, sm, 1, one_count, zero_count);
@@ -79,7 +78,6 @@ static void track_disable(PIO pio, int sm) {
 }
 
 static void handle_cmd(PIO pio, int sm) {
-
     fd_set rfds;
     struct timeval tv = {0, 0};
 
@@ -103,18 +101,21 @@ static void handle_cmd(PIO pio, int sm) {
     }
 
     if (sscanf(line, " %c %d", &dir, &speed) == 2) {
-
         if (speed < 2) speed = 2;
         if (speed > 127) speed = 127;
 
         if (dir == 'F' || dir == 'f') {
             speed_byte = 0x80 | speed;
-            printf("FORWARD %d\n", speed);
+            printf("FORWARD %d | packet %02X %02X %02X %02X\n",
+                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
+                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
             track_enable(pio, sm);
         }
         else if (dir == 'R' || dir == 'r') {
             speed_byte = speed;
-            printf("REVERSE %d\n", speed);
+            printf("REVERSE %d | packet %02X %02X %02X %02X\n",
+                   speed, LOCO_ADDR, DCC_INST_128, speed_byte,
+                   LOCO_ADDR ^ DCC_INST_128 ^ speed_byte);
             track_enable(pio, sm);
         }
 
@@ -123,20 +124,32 @@ static void handle_cmd(PIO pio, int sm) {
 }
 
 int main() {
-
     stdio_init_all();
     setvbuf(stdout, NULL, _IONBF, 0);
 
     struct gpiod_chip *chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        printf("Failed to open gpiochip0\n");
+        return 1;
+    }
+
     en_line = gpiod_chip_get_line(chip, PIN_EN);
-    gpiod_line_request_output(en_line, "dcc_enable", 0);
+    if (!en_line) {
+        printf("Failed to get EN line\n");
+        return 1;
+    }
+
+    if (gpiod_line_request_output(en_line, "dcc_enable", 0) < 0) {
+        printf("Failed to request EN line\n");
+        return 1;
+    }
 
     PIO pio = pio0;
     int sm = pio_claim_unused_sm(pio, true);
     uint offset = pio_add_program(pio, &dcc_wave_program);
 
-    pio_gpio_init(pio, PIN_A);
-    pio_gpio_init(pio, PIN_B);
+    pio_gpio_init(pio, PIN_A); // GPIO23 / IN2
+    pio_gpio_init(pio, PIN_B); // GPIO24 / IN1
     pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
 
     pio_sm_config c = dcc_wave_program_get_default_config(offset);
@@ -149,7 +162,9 @@ int main() {
     uint32_t one_count  = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("DCC READY (128-step version)\n");
+    printf("DCC ready\n");
+    printf("GPIO18=ENA, GPIO23=IN2, GPIO24=IN1\n");
+    printf("Commands: F <speed>, R <speed>, S\n");
 
     while (1) {
         handle_cmd(pio, sm);
