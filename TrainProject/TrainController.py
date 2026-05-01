@@ -1,38 +1,45 @@
 # TrainController.py
 
+from enum import Enum, auto
 import time
+
 from train_config import (
     CAR_ROSTER,
     DEFAULT_CONSIST_ORDER,
     LOCO_ADDRESS,
+    APPROACH_SPEED,
+    BACK_IN_SPEED,
+    PULL_OUT_SPEED,
     APPROACH_SEC,
     BACK_IN_SEC,
     DECOUPLE_SETTLE_SEC,
     PULL_OUT_SEC,
-    RETURN_TO_LOOP_SEC,
-    APPROACH_SPEED,
-    BACK_IN_SPEED,
-    PULL_OUT_SPEED,
-    VICTORY_LAP_SPEED,
 )
+
 from TrainIO import TrainIO
+from TrainRFID import TrainRFID
+
+
+class SortState(Enum):
+    IDLE = auto()
+    WAIT_FOR_RFID = auto()
+    IDENTIFY_CAR = auto()
+    ROUTE_SWITCHES = auto()
+    MOVE_TO_TRACK = auto()
+    DECOUPLE = auto()
+    PULL_OUT = auto()
+    NEXT_CAR = auto()
+    COMPLETE = auto()
+    ABORTED = auto()
 
 
 class TrainController:
-    """
-    Consist-aware sorter for this layout.
-
-    Physical model:
-    - Cars are behind the locomotive.
-    - Loco backs the consist into Track 1-4.
-    - Frontmost remaining car behind loco is the next dropped car.
-    - Loco then pulls forward out of the ladder.
-    - Victory lap is separate from the 4 destination tracks.
-    """
-
     def __init__(self, logger=print):
         self.logger = logger
         self.io = TrainIO(logger=self.log)
+        self.rfid = TrainRFID(logger=self.log)
+
+        self.state = SortState.IDLE
         self.running = False
 
         self.car_destinations = {
@@ -50,129 +57,183 @@ class TrainController:
             4: [],
         }
 
+        self.current_car = None
+        self.current_reader = None
+        self.current_tag = None
+        self.current_target_track = None
+
         self.current_speed = 0
         self.current_direction_forward = True
 
-    def log(self, msg: str):
+    def log(self, msg):
         self.logger(msg)
 
     # -------------------------------------------------
-    # Configuration
+    # Config
     # -------------------------------------------------
-    def set_destination(self, car_name: str, track: int):
+    def set_destination(self, car_name, track):
         if car_name not in self.car_destinations:
             self.log(f"[WARN] Unknown car: {car_name}")
             return
 
         if track not in [1, 2, 3, 4]:
-            self.log(f"[WARN] Invalid destination track: {track}")
+            self.log(f"[WARN] Invalid destination: Track {track}")
             return
 
         self.car_destinations[car_name] = track
         self.log(f"[CFG] {car_name} -> Track {track}")
 
     def set_consist_order(self, cars):
-        valid_cars = sorted(DEFAULT_CONSIST_ORDER)
-        if sorted(cars) != valid_cars:
+        if sorted(cars) != sorted(DEFAULT_CONSIST_ORDER):
             self.log("[WARN] Invalid consist order ignored")
             return
 
         self.initial_consist = list(cars)
         self.consist = list(cars)
-        self.log(f"[CFG] Consist order set to: {self.consist}")
+        self.log(f"[CFG] Consist order set to {self.consist}")
 
     # -------------------------------------------------
-    # State reporting
-    # -------------------------------------------------
-    def show_state(self):
-        self.log(f"[STATE] Remaining consist: {self.consist}")
-        self.log(f"[STATE] Track contents: {self.track_contents}")
-        self.log(f"[STATE] Destinations: {self.car_destinations}")
-
-    def get_next_car_to_drop(self):
-        if not self.consist:
-            return None
-        return self.consist[0]
-
-    # -------------------------------------------------
-    # Internal motion helpers
+    # Loco helpers
     # -------------------------------------------------
     def loco_stop(self):
         self.current_speed = 0
-        self.io.dcc_loco_speed(LOCO_ADDRESS, 0, self.current_direction_forward)
+        self.io.dcc_loco_speed(
+            LOCO_ADDRESS,
+            0,
+            self.current_direction_forward,
+        )
         self.log("[LOCO] Stop")
 
-    def loco_forward(self, speed: int):
+    def loco_forward(self, speed):
         self.current_speed = speed
         self.current_direction_forward = True
         self.io.dcc_loco_speed(LOCO_ADDRESS, speed, True)
         self.log(f"[LOCO] Forward speed {speed}")
 
-    def loco_reverse(self, speed: int):
+    def loco_reverse(self, speed):
         self.current_speed = speed
         self.current_direction_forward = False
         self.io.dcc_loco_speed(LOCO_ADDRESS, speed, False)
         self.log(f"[LOCO] Reverse speed {speed}")
 
     # -------------------------------------------------
-    # Automated sequence helpers
+    # State machine
     # -------------------------------------------------
-    def send_loco_to_victory_lap(self):
-        self.log("[SEQ] Sending locomotive to Victory Lap")
-        self.io.route_to_victory_lap()
-        self.loco_forward(VICTORY_LAP_SPEED)
-        time.sleep(RETURN_TO_LOOP_SEC)
-        self.loco_stop()
-        self.io.route_to_main_from_loop()
-        self.log("[SEQ] Locomotive reached Victory Lap staging area")
+    def start_sorting(self):
+        if self.running:
+            self.log("[SYSTEM] Already running")
+            return
 
-    def perform_dropoff_sequence(self, car_name: str, target_track: int):
-        self.log(f"[SEQ] Begin dropoff: {car_name} -> Track {target_track}")
+        self.running = True
+        self.state = SortState.WAIT_FOR_RFID
 
+        self.log("[SYSTEM] Sorting state machine started")
+        self.show_state()
+
+    def step_state_machine(self):
         if not self.running:
-            self.log("[SEQ] Aborted before start")
-            return False
+            return
 
-        # Make sure the loop switch allows access to main line
-        self.io.route_to_main_from_loop()
+        if self.state == SortState.WAIT_FOR_RFID:
+            self.state_wait_for_rfid()
 
-        # Approach ladder
+        elif self.state == SortState.IDENTIFY_CAR:
+            self.state_identify_car()
+
+        elif self.state == SortState.ROUTE_SWITCHES:
+            self.state_route_switches()
+
+        elif self.state == SortState.MOVE_TO_TRACK:
+            self.state_move_to_track()
+
+        elif self.state == SortState.DECOUPLE:
+            self.state_decouple()
+
+        elif self.state == SortState.PULL_OUT:
+            self.state_pull_out()
+
+        elif self.state == SortState.NEXT_CAR:
+            self.state_next_car()
+
+        elif self.state == SortState.COMPLETE:
+            self.state_complete()
+
+        elif self.state == SortState.ABORTED:
+            self.stop_sorting()
+
+    def state_wait_for_rfid(self):
+        self.log("[STATE] WAIT_FOR_RFID")
+
+        detections = self.rfid.scan_all()
+
+        if not detections:
+            return
+
+        for reader_name, data in detections.items():
+            car_name = data["car"]
+
+            if car_name:
+                self.current_reader = reader_name
+                self.current_tag = data["tag"]
+                self.current_car = car_name
+                self.state = SortState.IDENTIFY_CAR
+                return
+
+        self.log("[RFID] Unknown tag detected")
+
+    def state_identify_car(self):
+        self.log(
+            f"[STATE] IDENTIFY_CAR: {self.current_car} "
+            f"at {self.current_reader}"
+        )
+
+        if self.current_car not in self.consist:
+            self.log(f"[WARN] {self.current_car} already sorted or not in consist")
+            self.state = SortState.WAIT_FOR_RFID
+            return
+
+        self.current_target_track = self.car_destinations[self.current_car]
+
+        self.log(
+            f"[SORT] {self.current_car} destination = "
+            f"Track {self.current_target_track}"
+        )
+
+        self.state = SortState.ROUTE_SWITCHES
+
+    def state_route_switches(self):
+        self.log("[STATE] ROUTE_SWITCHES")
+
+        self.io.route_to_track(self.current_target_track)
+
+        self.state = SortState.MOVE_TO_TRACK
+
+    def state_move_to_track(self):
+        self.log("[STATE] MOVE_TO_TRACK")
+
         self.io.set_crossing(True)
+
         self.loco_forward(APPROACH_SPEED)
         time.sleep(APPROACH_SEC)
         self.loco_stop()
 
-        if not self.running:
-            self.io.set_crossing(False)
-            self.io.set_all_default()
-            self.log("[SEQ] Aborted after approach")
-            return False
-
-        # Set track route
-        self.io.route_to_track(target_track)
-
-        # Back cars into selected track
         self.loco_reverse(BACK_IN_SPEED)
         time.sleep(BACK_IN_SEC)
         self.loco_stop()
 
-        if not self.running:
-            self.io.set_crossing(False)
-            self.io.set_all_default()
-            self.log("[SEQ] Aborted after back-in")
-            return False
+        self.state = SortState.DECOUPLE
 
-        # Let train settle, then decouple
+    def state_decouple(self):
+        self.log("[STATE] DECOUPLE")
+
         time.sleep(DECOUPLE_SETTLE_SEC)
         self.io.decouple()
 
-        if not self.running:
-            self.io.set_crossing(False)
-            self.io.set_all_default()
-            self.log("[SEQ] Aborted after decouple")
-            return False
+        self.state = SortState.PULL_OUT
 
-        # Pull locomotive + remaining consist forward out of ladder
+    def state_pull_out(self):
+        self.log("[STATE] PULL_OUT")
+
         self.loco_forward(PULL_OUT_SPEED)
         time.sleep(PULL_OUT_SEC)
         self.loco_stop()
@@ -180,76 +241,89 @@ class TrainController:
         self.io.set_crossing(False)
         self.io.set_all_default()
 
-        self.log(f"[SEQ] Dropoff complete: {car_name}")
-        return True
+        self.state = SortState.NEXT_CAR
 
-    def sort_next_car(self):
-        car_name = self.get_next_car_to_drop()
-        if car_name is None:
-            self.log("[SORT] No cars left to sort")
-            return False
+    def state_next_car(self):
+        self.log("[STATE] NEXT_CAR")
 
-        target_track = self.car_destinations[car_name]
-        self.log(f"[SORT] Next car: {car_name}, destination Track {target_track}")
+        if self.current_car in self.consist:
+            self.consist.remove(self.current_car)
+            self.track_contents[self.current_target_track].append(self.current_car)
 
-        completed = self.perform_dropoff_sequence(car_name, target_track)
-        if not completed:
-            self.log("[SORT] Dropoff did not complete")
-            return False
+        self.log(
+            f"[SORT] Dropped {self.current_car} "
+            f"onto Track {self.current_target_track}"
+        )
 
-        dropped_car = self.consist.pop(0)
-        self.track_contents[target_track].append(dropped_car)
+        self.current_car = None
+        self.current_reader = None
+        self.current_tag = None
+        self.current_target_track = None
 
-        self.log(f"[SORT] Dropped {dropped_car} onto Track {target_track}")
-        self.show_state()
-        return True
-
-    def start_sorting(self):
-        self.running = True
-        self.log("[SYSTEM] Start automated sorting")
         self.show_state()
 
-        while self.running and len(self.consist) > 0:
-            ok = self.sort_next_car()
-            if not ok:
-                break
+        if len(self.consist) == 0:
+            self.state = SortState.COMPLETE
+        else:
+            self.state = SortState.WAIT_FOR_RFID
+
+    def state_complete(self):
+        self.log("[STATE] COMPLETE")
+        self.log("[SYSTEM] Sorting complete")
 
         self.loco_stop()
         self.io.set_all_default()
-        self.log("[SYSTEM] Sorting run complete")
-        self.show_state()
 
-        if self.running:
-            self.send_loco_to_victory_lap()
+        self.running = False
+        self.state = SortState.IDLE
 
+    # -------------------------------------------------
+    # Stop / reset
+    # -------------------------------------------------
     def stop_sorting(self):
         self.running = False
+        self.state = SortState.ABORTED
+
         self.loco_stop()
         self.io.set_crossing(False)
         self.io.set_all_default()
+
         self.log("[SYSTEM] Stop requested")
 
     def reset_system(self):
         self.stop_sorting()
+
+        self.state = SortState.IDLE
         self.consist = list(self.initial_consist)
+
         self.track_contents = {
             1: [],
             2: [],
             3: [],
             4: [],
         }
+
+        self.current_car = None
+        self.current_reader = None
+        self.current_tag = None
+        self.current_target_track = None
+
         self.io.set_all_default()
+
         self.log("[SYSTEM] Reset complete")
         self.show_state()
 
     # -------------------------------------------------
-    # Manual utility actions for GUI
+    # Manual helpers
     # -------------------------------------------------
-    def manual_route_track(self, track: int):
+    def manual_route_track(self, track):
         self.io.route_to_track(track)
 
     def manual_decouple(self):
         self.io.decouple()
 
-    def manual_send_to_victory_lap(self):
-        self.send_loco_to_victory_lap()
+    def show_state(self):
+        self.log(f"[STATE] Machine state: {self.state.name}")
+        self.log(f"[STATE] Remaining consist: {self.consist}")
+        self.log(f"[STATE] Track contents: {self.track_contents}")
+        self.log(f"[STATE] Destinations: {self.car_destinations}")

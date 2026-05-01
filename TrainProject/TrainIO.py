@@ -6,24 +6,27 @@ from train_config import (
     SWITCH_NAMES,
     LEFT,
     RIGHT,
-    SWITCH_THROW_SEC,
-    COUPLER_PULSE_SEC,
-    DCC_PREAMBLE_BITS,
-    LOOP_TO_MAIN,
-    LOOP_TO_VICTORY,
     BRANCH,
     STRAIGHT,
+    SWITCH_THROW_SEC,
+    COUPLER_PULSE_SEC,
+    SWITCH_GPIO,
+    COUPLER_GPIO,
+    CROSSING_GPIO,
 )
 
 
 class TrainIO:
     """
-    Hardware abstraction layer for:
-    - loop switch
-    - cascaded sorting switches
-    - crossing
-    - coupler / uncoupler
-    - DCC packet creation
+    Hardware layer.
+
+    Switch layout:
+    - S1 chooses Track 1 or continue
+    - S2 chooses Track 2 or continue
+    - S3 chooses Track 3 or continue
+    - If all switches are STRAIGHT, car reaches Track 4
+
+    No LOOP switch.
     """
 
     def __init__(self, logger=print):
@@ -31,88 +34,129 @@ class TrainIO:
         self.switch_positions = {name: LEFT for name in SWITCH_NAMES}
         self.crossing_active = False
         self.coupler_state = "IDLE"
+        self.lines = {}
 
-    def log(self, msg: str):
+        if not MOCK_MODE:
+            self._setup_gpio()
+
+    def log(self, msg):
         self.logger(msg)
 
-    # -----------------------------------------
-    # Switch control
-    # -----------------------------------------
-    def set_switch(self, switch_name: str, position: str):
+    # -------------------------------------------------
+    # GPIO setup
+    # -------------------------------------------------
+    def _setup_gpio(self):
+        import gpiod
+
+        self.chip = gpiod.Chip("gpiochip0")
+
+        all_output_pins = {}
+        all_output_pins.update(SWITCH_GPIO)
+        all_output_pins["COUPLER"] = COUPLER_GPIO
+        all_output_pins["CROSSING"] = CROSSING_GPIO
+
+        for name, pin in all_output_pins.items():
+            line = self.chip.get_line(pin)
+            line.request(
+                consumer="train-sorter",
+                type=gpiod.LINE_REQ_DIR_OUT,
+                default_vals=[0],
+            )
+            self.lines[name] = line
+
+        self.log("[GPIO] Setup complete")
+
+    def _gpio_on(self, name):
+        if not MOCK_MODE:
+            self.lines[name].set_value(1)
+
+    def _gpio_off(self, name):
+        if not MOCK_MODE:
+            self.lines[name].set_value(0)
+
+    # -------------------------------------------------
+    # Switch control with pulse timer
+    # -------------------------------------------------
+    def set_switch(self, switch_name, position):
         if switch_name not in self.switch_positions:
             self.log(f"[WARN] Unknown switch: {switch_name}")
             return
 
         if position not in (LEFT, RIGHT):
-            self.log(f"[WARN] Invalid position for {switch_name}: {position}")
+            self.log(f"[WARN] Invalid position: {position}")
             return
 
-        # Skip spam if already in desired position
-        if self.switch_positions[switch_name] == position:
+        left_output = f"{switch_name}_LEFT"
+        right_output = f"{switch_name}_RIGHT"
+
+        if left_output not in SWITCH_GPIO or right_output not in SWITCH_GPIO:
+            self.log(f"[WARN] Missing GPIO mapping for {switch_name}")
             return
+
+        active_output = left_output if position == LEFT else right_output
+        inactive_output = right_output if position == LEFT else left_output
 
         self.switch_positions[switch_name] = position
 
         if MOCK_MODE:
-            self.log(f"[MOCK] {switch_name} set to {position}")
+            self.log(
+                f"[MOCK SWITCH] {switch_name} -> {position} "
+                f"pulse {SWITCH_THROW_SEC}s"
+            )
             time.sleep(SWITCH_THROW_SEC)
             return
 
-        # Real hardware code goes here
-        self.log(f"[HW] {switch_name} set to {position}")
+        self._gpio_off(left_output)
+        self._gpio_off(right_output)
+        time.sleep(0.05)
+
+        self._gpio_on(active_output)
+        self._gpio_off(inactive_output)
+
+        self.log(f"[GPIO SWITCH] {switch_name} -> {position} pulse ON")
+
         time.sleep(SWITCH_THROW_SEC)
 
+        self._gpio_off(active_output)
+        self._gpio_off(inactive_output)
+
+        self.log(f"[GPIO SWITCH] {switch_name} -> {position} pulse OFF")
+
     def set_all_default(self):
-        """
-        Default state:
-        - LOOP goes to main sorting line
-        - S1/S2/S3 stay straight
-        """
-        self.set_switch("LOOP", LOOP_TO_MAIN)
         self.set_switch("S1", STRAIGHT)
         self.set_switch("S2", STRAIGHT)
         self.set_switch("S3", STRAIGHT)
 
-    def route_to_main_from_loop(self):
-        self.log("[ROUTE] Victory Lap -> Main sorting line")
-        self.set_switch("LOOP", LOOP_TO_MAIN)
-
-    def route_to_victory_lap(self):
-        self.log("[ROUTE] Main sorting line -> Victory Lap")
-        self.set_switch("LOOP", LOOP_TO_VICTORY)
-
-    def route_to_track(self, track: int):
-        """
-        Cascaded 4-track decision tree:
-
-        Track 1: S1 = BRANCH
-        Track 2: S1 = STRAIGHT, S2 = BRANCH
-        Track 3: S1 = STRAIGHT, S2 = STRAIGHT, S3 = BRANCH
-        Track 4: S1 = STRAIGHT, S2 = STRAIGHT, S3 = STRAIGHT
-        """
-        self.log(f"[ROUTE] Setting sorting path to Track {track}")
-
-        # Reset tree first
-        self.set_switch("LOOP", LOOP_TO_MAIN)
-        self.set_switch("S1", STRAIGHT)
-        self.set_switch("S2", STRAIGHT)
-        self.set_switch("S3", STRAIGHT)
+    def route_to_track(self, track):
+        self.log(f"[ROUTE] Setting route to Track {track}")
 
         if track == 1:
             self.set_switch("S1", BRANCH)
-        elif track == 2:
-            self.set_switch("S2", BRANCH)
-        elif track == 3:
-            self.set_switch("S3", BRANCH)
-        elif track == 4:
-            pass
-        else:
-            self.log(f"[WARN] Invalid track number: {track}")
+            self.set_switch("S2", STRAIGHT)
+            self.set_switch("S3", STRAIGHT)
 
-    # -----------------------------------------
-    # Crossing control
-    # -----------------------------------------
-    def set_crossing(self, active: bool):
+        elif track == 2:
+            self.set_switch("S1", STRAIGHT)
+            self.set_switch("S2", BRANCH)
+            self.set_switch("S3", STRAIGHT)
+
+        elif track == 3:
+            self.set_switch("S1", STRAIGHT)
+            self.set_switch("S2", STRAIGHT)
+            self.set_switch("S3", BRANCH)
+
+        elif track == 4:
+            self.set_switch("S1", STRAIGHT)
+            self.set_switch("S2", STRAIGHT)
+            self.set_switch("S3", STRAIGHT)
+
+        else:
+            self.log(f"[WARN] Invalid track: {track}")
+
+    # -------------------------------------------------
+    # Crossing
+    # -------------------------------------------------
+    def set_crossing(self, active):
         if self.crossing_active == active:
             return
 
@@ -120,88 +164,52 @@ class TrainIO:
         state = "ACTIVE" if active else "INACTIVE"
 
         if MOCK_MODE:
-            self.log(f"[MOCK] Crossing {state}")
+            self.log(f"[MOCK CROSSING] {state}")
             return
 
-        # Real hardware code goes here
-        self.log(f"[HW] Crossing {state}")
+        if active:
+            self._gpio_on("CROSSING")
+        else:
+            self._gpio_off("CROSSING")
 
-    # -----------------------------------------
-    # Coupler / uncoupler
-    # -----------------------------------------
+        self.log(f"[GPIO CROSSING] {state}")
+
+    # -------------------------------------------------
+    # Coupler
+    # -------------------------------------------------
     def decouple(self):
         self.coupler_state = "DECOUPLING"
 
         if MOCK_MODE:
-            self.log("[MOCK] Decoupler pulse fired")
+            self.log(f"[MOCK COUPLER] Decouple pulse {COUPLER_PULSE_SEC}s")
             time.sleep(COUPLER_PULSE_SEC)
             self.coupler_state = "IDLE"
             return
 
-        self.log("[HW] Decoupler pulse fired")
+        self.log(f"[GPIO COUPLER] Decouple pulse {COUPLER_PULSE_SEC}s")
+        self._gpio_on("COUPLER")
         time.sleep(COUPLER_PULSE_SEC)
+        self._gpio_off("COUPLER")
+
         self.coupler_state = "IDLE"
 
-    def couple(self):
-        self.coupler_state = "COUPLING"
+    # -------------------------------------------------
+    # DCC placeholder
+    # -------------------------------------------------
+    def dcc_loco_speed(self, address, speed, forward=True):
+        direction = "FORWARD" if forward else "REVERSE"
+        self.log(f"[DCC PLACEHOLDER] addr={address} speed={speed} dir={direction}")
 
+    # -------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------
+    def cleanup(self):
         if MOCK_MODE:
-            self.log("[MOCK] Coupling sequence")
-            time.sleep(COUPLER_PULSE_SEC)
-            self.coupler_state = "IDLE"
+            self.log("[MOCK GPIO] Cleanup")
             return
 
-        self.log("[HW] Coupling sequence")
-        time.sleep(COUPLER_PULSE_SEC)
-        self.coupler_state = "IDLE"
+        for name, line in self.lines.items():
+            line.set_value(0)
+            line.release()
 
-    # -----------------------------------------
-    # DCC helpers
-    # -----------------------------------------
-    def xor_checksum(self, data_bytes):
-        checksum = 0
-        for value in data_bytes:
-            checksum ^= value
-        return checksum
-
-    def build_dcc_packet(self, data_bytes):
-        checksum = self.xor_checksum(data_bytes)
-        full_bytes = list(data_bytes) + [checksum]
-
-        bits = []
-        bits.extend([1] * DCC_PREAMBLE_BITS)
-        bits.append(0)
-
-        for index, byte in enumerate(full_bytes):
-            for bit_index in range(7, -1, -1):
-                bits.append((byte >> bit_index) & 1)
-
-            if index == len(full_bytes) - 1:
-                bits.append(1)
-            else:
-                bits.append(0)
-
-        return bits
-
-    def send_dcc_packet(self, data_bytes, label="DCC"):
-        bits = self.build_dcc_packet(data_bytes)
-
-        if MOCK_MODE:
-            self.log(f"[MOCK][{label}] bytes={data_bytes}")
-            return bits
-
-        self.log(f"[HW][{label}] Sent DCC packet: {data_bytes}")
-        return bits
-
-    def dcc_loco_speed(self, address: int, speed: int, forward: bool = True):
-        speed = max(0, min(speed, 28))
-        direction_bit = 0x20 if forward else 0x00
-        speed_byte = 0x40 | direction_bit | speed
-        return self.send_dcc_packet([address, speed_byte], label="LOCO_SPEED")
-
-    def dcc_function(self, address: int, function_group_byte: int):
-        return self.send_dcc_packet([address, function_group_byte], label="LOCO_FUNC")
-
-    def dcc_accessory(self, address: int, activate: bool = True):
-        cmd = 0x01 if activate else 0x00
-        return self.send_dcc_packet([address & 0xFF, cmd], label="ACCESSORY")
+        self.log("[GPIO] Cleanup complete")

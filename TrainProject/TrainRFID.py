@@ -1,49 +1,73 @@
 # TrainRFID.py
 
 from collections import deque
-from train_config import CAR_ROSTER, MOCK_MODE
+from train_config import CAR_ROSTER, MOCK_MODE, RFID_READERS
 
 
 class TrainRFID:
     """
-    Fixed-roster RFID handler.
-    In mock mode, it returns tags from a queue you control.
+    4-reader RFID handler.
+
+    Reader locations:
+    - RFID0_ENTRY
+    - RFID1_S1
+    - RFID2_S2
+    - RFID3_S3
     """
 
-    def __init__(self):
-        self.mock_queue = deque()
-        self.last_tag = None
-        self.rfid_to_car = {info["rfid"]: car_name for car_name, info in CAR_ROSTER.items()}
+    def __init__(self, logger=print):
+        self.logger = logger
 
-    def enqueue_mock_tag(self, tag: str) -> None:
-        if tag in self.rfid_to_car:
-            self.mock_queue.append(tag)
+        self.rfid_to_car = {
+            info["rfid"]: car_name
+            for car_name, info in CAR_ROSTER.items()
+        }
 
-    def enqueue_mock_car(self, car_name: str) -> None:
-        car = CAR_ROSTER.get(car_name)
-        if car:
-            self.mock_queue.append(car["rfid"])
+        self.mock_queues = {
+            reader_name: deque()
+            for reader_name in RFID_READERS
+        }
 
-    def read_tag(self):
-        """
-        Replace the real section with MFRC522 or your actual RFID reader code.
-        """
-        if MOCK_MODE:
-            if self.mock_queue:
-                self.last_tag = self.mock_queue.popleft()
-                return self.last_tag
+    def log(self, msg):
+        self.logger(msg)
+
+    def enqueue_mock_car(self, reader_name, car_name):
+        if reader_name not in self.mock_queues:
+            self.log(f"[RFID WARN] Unknown reader: {reader_name}")
+            return
+
+        if car_name not in CAR_ROSTER:
+            self.log(f"[RFID WARN] Unknown car: {car_name}")
+            return
+
+        tag = CAR_ROSTER[car_name]["rfid"]
+        self.mock_queues[reader_name].append(tag)
+
+    def read_reader(self, reader_name):
+        if reader_name not in RFID_READERS:
+            self.log(f"[RFID WARN] Unknown reader: {reader_name}")
             return None
 
-        # Real RFID code goes here
+        if MOCK_MODE:
+            if self.mock_queues[reader_name]:
+                tag = self.mock_queues[reader_name].popleft()
+                self.log(f"[MOCK RFID] {reader_name} read tag {tag}")
+                return tag
+            return None
+
+        # Real MFRC522 code goes here later
         return None
 
-    def identify_car(self, tag: str):
-        if not tag:
-            return None
-        return self.rfid_to_car.get(tag)
+    def scan_all(self):
+        detections = {}
 
-    def get_default_track(self, tag: str):
-        car_name = self.identify_car(tag)
-        if not car_name:
-            return None
-        return CAR_ROSTER[car_name]["default_track"]
+        for reader_name in RFID_READERS:
+            tag = self.read_reader(reader_name)
+
+            if tag:
+                detections[reader_name] = {
+                    "tag": tag,
+                    "car": self.rfid_to_car.get(tag),
+                }
+
+        return detections
