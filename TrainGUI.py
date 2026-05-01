@@ -9,9 +9,9 @@ WINDOW_TITLE = "Train Sorter"
 WINDOW_SIZE  = "860x900"
 
 CAR_COLORS = {
-    "CAR_A": "#e74c3c",   # red
-    "CAR_B": "#2980b9",   # blue
-    "CAR_C": "#e67e22",   # orange
+    "Red":    "#e74c3c",
+    "Blue":   "#2980b9",
+    "Orange": "#e67e22",
 }
 
 
