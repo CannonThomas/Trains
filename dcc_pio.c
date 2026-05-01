@@ -1,6 +1,6 @@
+cat > dcc_pio.c <<'EOF'
 #include <stdio.h>
 #include <stdint.h>
-#include <stdbool.h>
 #include <unistd.h>
 #include <sys/select.h>
 #include <lgpio.h>
@@ -10,9 +10,13 @@
 
 #define GPIOCHIP 0
 
+// Your older working-ish wiring:
+// GPIO18 -> ENA
+// GPIO23 -> IN2
+// GPIO24 -> IN1
 #define ENA 18
-#define PIN_A 23   // IN2
-#define PIN_B 24   // IN1
+#define PIN_A 23
+#define PIN_B 24
 
 #define DCC_ONE_US   58
 #define DCC_ZERO_US 100
@@ -20,7 +24,7 @@
 #define LOCO_ADDR 3
 
 static int h = -1;
-static uint8_t data_byte = 0x60; // STOP packet
+static uint8_t data_byte = 0x60; // STOP packet by default
 
 static inline uint32_t pio_count_from_us(uint32_t us)
 {
@@ -35,10 +39,10 @@ static inline void send_bit(PIO pio,
 {
     uint32_t count = bit ? one_count : zero_count;
 
-    // First half-cycle
+    // PIO program alternates:
+    // 1st count -> GPIO23=1 GPIO24=0
+    // 2nd count -> GPIO23=0 GPIO24=1
     pio_sm_put_blocking(pio, sm, count);
-
-    // Second half-cycle
     pio_sm_put_blocking(pio, sm, count);
 }
 
@@ -61,7 +65,7 @@ static void send_packet(PIO pio,
 {
     uint8_t checksum = LOCO_ADDR ^ data_byte;
 
-    // Previous group's simple style: 12 preamble 1 bits
+    // Same simple style as previous group: 12 preamble 1 bits
     for (int i = 0; i < 12; i++)
     {
         send_bit(pio, sm, 1, one_count, zero_count);
@@ -154,28 +158,15 @@ int main(void)
     uint offset = pio_add_program(pio, &dcc_wave_program);
     printf("Loaded PIO program at offset: %u\n", offset);
 
-    pio_gpio_init(pio, PIN_A);
-    pio_gpio_init(pio, PIN_B);
+    dcc_wave_program_init(pio, sm, offset, PIN_A);
 
-    // GPIO23 and GPIO24 are consecutive
-    pio_sm_set_consecutive_pindirs(pio, sm, PIN_A, 2, true);
-
-    pio_sm_config c = dcc_wave_program_get_default_config(offset);
-
-    // This assumes dcc_wave.pio uses .side_set 2
-    sm_config_set_sideset_pins(&c, PIN_A);
-
-    // 125 MHz / 125 = about 1 MHz, so 1 PIO cycle ~= 1 us
-    sm_config_set_clkdiv(&c, 125.0f);
-
-    pio_sm_init(pio, sm, offset, &c);
     pio_sm_clear_fifos(pio, sm);
     pio_sm_set_enabled(pio, sm, true);
 
     uint32_t one_count = pio_count_from_us(DCC_ONE_US);
     uint32_t zero_count = pio_count_from_us(DCC_ZERO_US);
 
-    printf("DCC PIO with verified polarity logic\n");
+    printf("DCC PIO live packet sender\n");
     printf("GPIO18=ENA, GPIO23=IN2, GPIO24=IN1\n");
     printf("Commands: F, R, S, X\n");
     printf("one_count=%u zero_count=%u\n", one_count, zero_count);
@@ -191,3 +182,4 @@ int main(void)
 
     return 0;
 }
+EOF
