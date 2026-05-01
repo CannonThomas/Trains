@@ -7,6 +7,9 @@ WINDOW_SIZE  = "900x750"
 
 MOCK_MODE = False
 
+# Pi 5 uses gpiochip4; older Pi models use gpiochip0
+GPIO_CHIP = 4
+
 _ROSTER_FILE = os.path.join(os.path.dirname(__file__), "car_roster.json")
 
 

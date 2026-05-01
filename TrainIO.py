@@ -21,7 +21,7 @@ class TrainIO:
                 self.logger("[IO] MOCK_MODE enabled")
             return
 
-        self.chip = lgpio.gpiochip_open(0)
+        self.chip = lgpio.gpiochip_open(train_config.GPIO_CHIP)
 
         # Claim both coil pins for every switch as outputs, initially LOW
         for sw_name, pins in train_config.SWITCH_PINS.items():

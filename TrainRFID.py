@@ -204,7 +204,7 @@ class TrainRFID:
             self._ready = True
             return True
         try:
-            self._chip = lgpio.gpiochip_open(0)
+            self._chip = lgpio.gpiochip_open(train_config.GPIO_CHIP)
 
             self._spi = spidev.SpiDev()
             self._spi.open(0, 0)            # SPI bus 0, device 0
