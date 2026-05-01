@@ -45,6 +45,11 @@ SWITCH_PINS = {
 SWITCH_SIDING_DIR   = {"S1": "LEFT", "S2": "LEFT", "S3": "LEFT"}
 SWITCH_PULSE_SEC    = 0.001   # 1 ms solenoid impulse
 
+# RFID1 = entry reader (scans consist order)
+# RFID2/3/4 = end of Track 1/2/3 (confirm drop)
+ENTRY_READER_IDX  = 0
+TRACK_READER_IDX  = {1: 1, 2: 2, 3: 3}   # track number → RFID reader index
+
 # ── SPI bit-bang pins (shared by all 4 readers) ───────────────────────────────
 SPI_MOSI = 10   # Pin 19
 SPI_MISO = 9    # Pin 21

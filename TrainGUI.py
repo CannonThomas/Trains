@@ -3,8 +3,10 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 import train_config
-from train_config import WINDOW_TITLE, WINDOW_SIZE
 from TrainController import TrainController
+
+WINDOW_TITLE = "Train Sorter"
+WINDOW_SIZE  = "860x900"
 
 
 class TrainSorterGUI:
@@ -17,119 +19,154 @@ class TrainSorterGUI:
         self._pending_logs = []
 
         self.controller = TrainController(logger=self.log)
+        self.controller.on_car_scanned    = self._on_car_scanned
+        self.controller.on_status_change  = self._on_status_change
+        self.controller.on_drop_confirmed = self._on_drop_confirmed
 
-        # Registration state
-        self._scanned_uid    = tk.StringVar(value="")
-        self._scanned_reader = tk.StringVar(value="")
-        self._reg_car_name   = tk.StringVar()
-        self._reg_track_var  = tk.IntVar(value=1)
+        # Pre-create StringVars so helper methods can reference them safely
+        self._status_var    = tk.StringVar(value="Scan cars first (Step 1).")
+        self._next_car_var  = tk.StringVar(value="Next to drop: —")
 
         self._build_widgets()
         self._flush_pending_logs()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    # ── Widget construction ───────────────────────────────────────────────────
+    # ── Build UI ──────────────────────────────────────────────────────────────
 
     def _build_widgets(self):
-        # ── Top controls ──────────────────────────────────────────────────────
-        top = ttk.LabelFrame(self.root, text="Controls", padding=8)
-        top.pack(fill="x", padx=10, pady=6)
+        pad = {"padx": 10, "pady": 5}
 
-        self._auto_btn = ttk.Button(top, text="Start Auto-Scan", command=self._toggle_auto_scan)
-        self._auto_btn.pack(side="left", padx=5)
+        # ── STEP 1: Scan ──────────────────────────────────────────────────────
+        f1 = ttk.LabelFrame(self.root, text="Step 1 — Scan Car Order (drive past entry reader)", padding=8)
+        f1.pack(fill="x", **pad)
 
-        ttk.Button(top, text="Show State", command=self.controller.show_state).pack(side="left", padx=5)
+        btn_row = ttk.Frame(f1)
+        btn_row.pack(fill="x")
+        ttk.Button(btn_row, text="▶  Start Scan", command=self._start_scan).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="■  Stop Scan",  command=self._stop_scan).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="Clear",         command=self._clear_consist).pack(side="left", padx=4)
 
-        self._mock_var = tk.BooleanVar(value=train_config.MOCK_MODE)
-        ttk.Checkbutton(
-            top, text="Mock Mode",
-            variable=self._mock_var, command=self._toggle_mock
-        ).pack(side="left", padx=12)
+        ttk.Label(f1, text="Consist (front → back):").pack(anchor="w", pady=(6, 0))
+        self._consist_frame = ttk.Frame(f1)
+        self._consist_frame.pack(fill="x")
+        self._refresh_consist_display()
 
-        # ── RFID Registration ─────────────────────────────────────────────────
-        reg = ttk.LabelFrame(self.root, text="RFID Registration", padding=8)
-        reg.pack(fill="x", padx=10, pady=6)
+        # ── STEP 2: Assign Tracks ─────────────────────────────────────────────
+        f2 = ttk.LabelFrame(self.root, text="Step 2 — Assign Destination Tracks", padding=8)
+        f2.pack(fill="x", **pad)
 
-        scan_row = ttk.Frame(reg)
-        scan_row.pack(fill="x", pady=2)
-        ttk.Button(scan_row, text="Scan All Readers", command=self._start_scan).pack(side="left", padx=4)
-        ttk.Label(scan_row, text="Reader:").pack(side="left", padx=(12, 2))
-        ttk.Label(scan_row, textvariable=self._scanned_reader, width=8, relief="sunken").pack(side="left")
-        ttk.Label(scan_row, text="UID:").pack(side="left", padx=(10, 2))
-        ttk.Label(scan_row, textvariable=self._scanned_uid, width=12,
-                  relief="sunken", font=("Courier", 10)).pack(side="left")
-
-        reg_row = ttk.Frame(reg)
-        reg_row.pack(fill="x", pady=4)
-        ttk.Label(reg_row, text="Car name:").pack(side="left", padx=4)
-        ttk.Entry(reg_row, textvariable=self._reg_car_name, width=14).pack(side="left", padx=4)
-        ttk.Label(reg_row, text="→ Track:").pack(side="left", padx=(8, 2))
-        ttk.Combobox(
-            reg_row, textvariable=self._reg_track_var,
-            values=[1, 2, 3], state="readonly", width=5
-        ).pack(side="left", padx=4)
-        ttk.Button(reg_row, text="Register Tag", command=self._register_car).pack(side="left", padx=8)
-        ttk.Button(reg_row, text="Clear",        command=self._clear_reg).pack(side="left")
-
-        # Roster table
-        tree_frame = ttk.Frame(reg)
-        tree_frame.pack(fill="x", pady=4)
-
-        cols = ("car", "uid", "track")
-        self._roster_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=5)
-        self._roster_tree.heading("car",   text="Car Name")
-        self._roster_tree.heading("uid",   text="RFID UID")
-        self._roster_tree.heading("track", text="Track")
-        self._roster_tree.column("car",   width=130)
-        self._roster_tree.column("uid",   width=130)
-        self._roster_tree.column("track", width=70)
-        self._roster_tree.pack(side="left", fill="x", expand=True)
-        ttk.Scrollbar(tree_frame, orient="vertical",
-                      command=self._roster_tree.yview).pack(side="right", fill="y")
-
-        ttk.Button(reg, text="Delete Selected Car", command=self._delete_car).pack(anchor="w", pady=2)
-        self._refresh_tree()
-
-        # ── Car Destination Assignment ─────────────────────────────────────────
-        self._dest_outer = ttk.LabelFrame(self.root, text="Car Destination Assignment", padding=8)
-        self._dest_outer.pack(fill="x", padx=10, pady=6)
         self._dest_inner = None
         self._track_vars: dict = {}
+        self._dest_outer = f2
         self._rebuild_dest_panel()
 
-        # ── Manual Switch Controls ─────────────────────────────────────────────
-        sw = ttk.LabelFrame(self.root, text="Manual Switch Control", padding=8)
-        sw.pack(fill="x", padx=10, pady=6)
+        # ── STEP 3: Sort ──────────────────────────────────────────────────────
+        f3 = ttk.LabelFrame(self.root, text="Step 3 — Sort", padding=8)
+        f3.pack(fill="x", **pad)
 
-        ttk.Button(sw, text="Route Track 1", command=lambda: self.controller.manual_route_track(1)).pack(side="left", padx=5)
-        ttk.Button(sw, text="Route Track 2", command=lambda: self.controller.manual_route_track(2)).pack(side="left", padx=5)
-        ttk.Button(sw, text="Route Track 3", command=lambda: self.controller.manual_route_track(3)).pack(side="left", padx=5)
-        ttk.Button(sw, text="Main Line",     command=self.controller.manual_route_main).pack(side="left", padx=5)
+        status_lbl = ttk.Label(
+            f3, textvariable=self._status_var,
+            relief="sunken", anchor="w", padding=6,
+            wraplength=780, justify="left",
+            font=("TkDefaultFont", 11, "bold")
+        )
+        status_lbl.pack(fill="x", pady=(0, 6))
 
-        # ── RFID Test Controls ─────────────────────────────────────────────────
-        rfid = ttk.LabelFrame(self.root, text="RFID Test", padding=8)
-        rfid.pack(fill="x", padx=10, pady=6)
+        ttk.Label(f3, textvariable=self._next_car_var).pack(anchor="w")
 
-        ttk.Button(rfid, text="Scan Once (log)",  command=lambda: self.run_bg(self.controller.scan_once)).pack(side="left", padx=4)
-        ttk.Button(rfid, text="Scan + Route",     command=lambda: self.run_bg(self.controller.scan_and_route)).pack(side="left", padx=4)
+        sort_btns = ttk.Frame(f3)
+        sort_btns.pack(fill="x", pady=4)
+        ttk.Button(sort_btns, text="🔀  Fire Switch & Wait",
+                   command=self._fire_switch).pack(side="left", padx=4)
+        ttk.Button(sort_btns, text="✓  Manual Confirm Drop",
+                   command=self.controller.manual_confirm_drop).pack(side="left", padx=4)
+        ttk.Button(sort_btns, text="Skip Car",
+                   command=self._skip_car).pack(side="left", padx=4)
+        ttk.Button(sort_btns, text="Reset All",
+                   command=self._reset).pack(side="left", padx=20)
 
-        for i, r in enumerate(train_config.RFID_READERS):
+        # ── Track Status ──────────────────────────────────────────────────────
+        f4 = ttk.LabelFrame(self.root, text="Track Status", padding=8)
+        f4.pack(fill="x", **pad)
+
+        self._track_vars_display = {}
+        for track in (1, 2, 3):
+            var = tk.StringVar(value=f"Track {track}: empty")
+            self._track_vars_display[track] = var
+            ttk.Label(f4, textvariable=var, width=22, relief="groove",
+                      anchor="center", padding=4).pack(side="left", padx=6)
+
+        # ── Manual Switch Controls ────────────────────────────────────────────
+        f5 = ttk.LabelFrame(self.root, text="Manual Switch Control", padding=8)
+        f5.pack(fill="x", **pad)
+
+        for sw in ("S1", "S2", "S3"):
+            row = ttk.Frame(f5)
+            row.pack(side="left", padx=10)
+            ttk.Label(row, text=sw, width=4).pack(side="left")
+            ttk.Button(row, text="LEFT",
+                       command=lambda s=sw: self.run_bg(
+                           lambda sw=s: self.controller.manual_pulse(sw, "LEFT")
+                       )).pack(side="left", padx=2)
+            ttk.Button(row, text="RIGHT",
+                       command=lambda s=sw: self.run_bg(
+                           lambda sw=s: self.controller.manual_pulse(sw, "RIGHT")
+                       )).pack(side="left", padx=2)
+
+        ttk.Button(f5, text="All Straight",
+                   command=lambda: self.run_bg(self.controller.manual_all_straight)
+                   ).pack(side="left", padx=16)
+
+        # ── RFID Test ─────────────────────────────────────────────────────────
+        f6 = ttk.LabelFrame(self.root, text="RFID Test", padding=8)
+        f6.pack(fill="x", **pad)
+
+        reader_labels = ["Entry (RFID1)", "Track 1 end (RFID2)",
+                         "Track 2 end (RFID3)", "Track 3 end (RFID4)"]
+        for i, label in enumerate(reader_labels):
             ttk.Button(
-                rfid, text=f"Poll {r['name']}",
-                command=lambda idx=i: self.run_bg(lambda i=idx: self._poll_reader(i))
-            ).pack(side="left", padx=3)
+                f6, text=f"Test {label}",
+                command=lambda idx=i: self.run_bg(
+                    lambda i=idx: self.controller.test_reader(i)
+                )
+            ).pack(side="left", padx=4)
 
-        # ── System Log ────────────────────────────────────────────────────────
-        log_frame = ttk.LabelFrame(self.root, text="System Log", padding=8)
-        log_frame.pack(fill="both", expand=True, padx=10, pady=6)
+        ttk.Button(f6, text="Show State",
+                   command=self.controller.show_state).pack(side="left", padx=8)
 
-        self.log_text = tk.Text(log_frame, wrap="word", height=16)
-        sb = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        # ── Mock mode ─────────────────────────────────────────────────────────
+        misc = ttk.Frame(self.root)
+        misc.pack(fill="x", padx=10, pady=2)
+        self._mock_var = tk.BooleanVar(value=train_config.MOCK_MODE)
+        ttk.Checkbutton(misc, text="Mock Mode (no hardware)",
+                        variable=self._mock_var,
+                        command=self._toggle_mock).pack(side="left")
+
+        # ── Log ───────────────────────────────────────────────────────────────
+        f7 = ttk.LabelFrame(self.root, text="Log", padding=8)
+        f7.pack(fill="both", expand=True, **pad)
+
+        self.log_text = tk.Text(f7, wrap="word", height=12)
+        sb = ttk.Scrollbar(f7, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=sb.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
 
     # ── Dynamic panels ────────────────────────────────────────────────────────
+
+    def _refresh_consist_display(self):
+        for w in self._consist_frame.winfo_children():
+            w.destroy()
+        if not self.controller.car_order:
+            ttk.Label(self._consist_frame, text="(none yet)",
+                      foreground="gray").pack(side="left", padx=4)
+        else:
+            for i, car in enumerate(self.controller.car_order):
+                lbl = ttk.Label(self._consist_frame,
+                                text=f"{i+1}. {car}",
+                                relief="groove", padding=4)
+                lbl.pack(side="left", padx=3)
+        self._update_next_car_label()
 
     def _rebuild_dest_panel(self):
         if self._dest_inner:
@@ -140,111 +177,81 @@ class TrainSorterGUI:
 
         cars = list(train_config.CAR_ROSTER.keys())
         if not cars:
-            ttk.Label(self._dest_inner, text="No cars registered yet.").pack(anchor="w")
+            ttk.Label(self._dest_inner,
+                      text="No cars in roster yet — add UIDs to car_roster.json",
+                      foreground="gray").grid(row=0, column=0, padx=5, pady=3)
             return
 
-        for row_i, car_name in enumerate(cars):
+        for col, car_name in enumerate(cars):
             default = self.controller.car_destinations.get(car_name, 1)
-            ttk.Label(self._dest_inner, text=car_name, width=14).grid(
-                row=row_i, column=0, padx=5, pady=3, sticky="w"
-            )
+            ttk.Label(self._dest_inner, text=car_name,
+                      width=10).grid(row=0, column=col*3,   padx=4, pady=3)
             var = tk.IntVar(value=default)
             self._track_vars[car_name] = var
-            ttk.Combobox(
-                self._dest_inner, textvariable=var,
-                values=[1, 2, 3], state="readonly", width=8
-            ).grid(row=row_i, column=1, padx=5, pady=3)
-            ttk.Button(
-                self._dest_inner, text="Apply",
-                command=lambda c=car_name, v=var: self.controller.set_destination(c, int(v.get()))
-            ).grid(row=row_i, column=2, padx=5, pady=3)
+            ttk.Combobox(self._dest_inner, textvariable=var,
+                         values=[1, 2, 3], state="readonly",
+                         width=5).grid(row=0, column=col*3+1, padx=2, pady=3)
+            ttk.Button(self._dest_inner, text="Set",
+                       command=lambda c=car_name, v=var:
+                           self.controller.set_destination(c, int(v.get()))
+                       ).grid(row=0, column=col*3+2, padx=2, pady=3)
 
-    # ── Roster ────────────────────────────────────────────────────────────────
+    def _update_next_car_label(self):
+        car = self.controller.next_car
+        if car:
+            track = self.controller.car_destinations.get(car, "?")
+            self._next_car_var.set(f"Next to drop (back of train): {car} → Track {track}")
+        else:
+            self._next_car_var.set("Next to drop: — (no cars in consist)")
 
-    def _refresh_tree(self):
-        self._roster_tree.delete(*self._roster_tree.get_children())
-        for name, info in train_config.CAR_ROSTER.items():
-            self._roster_tree.insert("", "end", values=(name, info["rfid"], info["default_track"]))
+    # ── Controller callbacks (called from background threads) ─────────────────
 
-    # ── Registration ─────────────────────────────────────────────────────────
+    def _on_car_scanned(self, car_name):
+        self.root.after(0, self._refresh_consist_display)
+
+    def _on_status_change(self, msg):
+        self.root.after(0, lambda m=msg: self._status_var.set(m))
+        self.root.after(0, self._update_next_car_label)
+
+    def _on_drop_confirmed(self, car_name, track):
+        def _update():
+            self._track_vars_display[track].set(f"Track {track}: {car_name}")
+            self._refresh_consist_display()
+        self.root.after(0, _update)
+
+    # ── Button handlers ───────────────────────────────────────────────────────
 
     def _start_scan(self):
-        self._scanned_uid.set("scanning…")
-        self._scanned_reader.set("")
-        self.run_bg(self._do_scan)
+        self.run_bg(self.controller.start_entry_scan)
 
-    def _do_scan(self):
-        reader_idx, uid = self.controller.rfid.scan_all(timeout_sec=5.0)
-        if uid is None:
-            self.root.after(0, lambda: self._scanned_uid.set("(none)"))
-            self.root.after(0, lambda: self._scanned_reader.set(""))
-            self.log("[REG] No tag found within 5 s")
-        else:
-            rname = train_config.RFID_READERS[reader_idx]["name"]
-            self.root.after(0, lambda u=uid:    self._scanned_uid.set(u))
-            self.root.after(0, lambda n=rname:  self._scanned_reader.set(n))
-            known = self.controller.rfid.identify_car(uid)
-            if known:
-                self.root.after(0, lambda k=known: self._reg_car_name.set(k))
-            self.log(f"[REG] Scanned {uid} on {rname}")
+    def _stop_scan(self):
+        self.controller.stop_entry_scan()
+        self.root.after(0, self._refresh_consist_display)
 
-    def _register_car(self):
-        uid   = self._scanned_uid.get().strip()
-        name  = self._reg_car_name.get().strip()
-        track = self._reg_track_var.get()
+    def _clear_consist(self):
+        self.controller.clear_consist()
+        self.root.after(0, self._refresh_consist_display)
 
-        if not uid or uid in ("scanning…", "(none)"):
-            messagebox.showwarning("Registration", "Scan a tag first.")
-            return
-        if not name:
-            messagebox.showwarning("Registration", "Enter a car name.")
-            return
+    def _fire_switch(self):
+        self.run_bg(self.controller.fire_switch_for_next_car)
 
-        if self.controller.register_car(name, uid, track):
-            self._refresh_tree()
-            self._rebuild_dest_panel()
-            self._clear_reg()
+    def _skip_car(self):
+        self.controller.skip_car()
+        self.root.after(0, self._refresh_consist_display)
 
-    def _clear_reg(self):
-        self._scanned_uid.set("")
-        self._scanned_reader.set("")
-        self._reg_car_name.set("")
-        self._reg_track_var.set(1)
+    def _reset(self):
+        self.controller.reset()
+        for t in (1, 2, 3):
+            self._track_vars_display[t].set(f"Track {t}: empty")
+        self.root.after(0, self._refresh_consist_display)
 
-    def _delete_car(self):
-        sel = self._roster_tree.selection()
-        if not sel:
-            return
-        car_name = self._roster_tree.item(sel[0])["values"][0]
-        if messagebox.askyesno("Delete", f"Remove '{car_name}' from the roster?"):
-            self.controller.unregister_car(car_name)
-            self._refresh_tree()
-            self._rebuild_dest_panel()
-
-    # ── Auto-scan toggle ──────────────────────────────────────────────────────
-
-    def _toggle_auto_scan(self):
-        if self.controller._auto_scan:
-            self.controller.stop_auto_scan()
-            self._auto_btn.configure(text="Start Auto-Scan")
-        else:
-            self.controller.start_auto_scan()
-            self._auto_btn.configure(text="Stop Auto-Scan")
-
-    # ── RFID test helpers ─────────────────────────────────────────────────────
-
-    def _poll_reader(self, reader_idx: int):
-        uid = self.controller.rfid.scan_reader(reader_idx, timeout_sec=3.0)
-        name = train_config.RFID_READERS[reader_idx]["name"]
-        if uid:
-            car = self.controller.rfid.identify_car(uid)
-            self.log(f"[RFID] {name}: {uid}{' → ' + car if car else ' (unregistered)'}")
-        else:
-            self.log(f"[RFID] {name}: no tag detected")
+    def _toggle_mock(self):
+        train_config.MOCK_MODE = self._mock_var.get()
+        self.log(f"[CONFIG] MOCK_MODE = {train_config.MOCK_MODE}")
 
     # ── Logging ───────────────────────────────────────────────────────────────
 
-    def _append_log(self, msg: str):
+    def _append_log(self, msg):
         if self.log_text is None:
             self._pending_logs.append(msg)
             print(msg)
@@ -262,7 +269,7 @@ class TrainSorterGUI:
             self.log_text.see("end")
         self._pending_logs.clear()
 
-    def log(self, msg: str):
+    def log(self, msg):
         try:
             self.root.after(0, lambda m=msg: self._append_log(m))
         except Exception:
@@ -271,12 +278,7 @@ class TrainSorterGUI:
     def run_bg(self, target):
         threading.Thread(target=target, daemon=True).start()
 
-    def _toggle_mock(self):
-        train_config.MOCK_MODE = self._mock_var.get()
-        self.log(f"[CONFIG] MOCK_MODE = {train_config.MOCK_MODE}")
-
     def on_close(self):
-        self.log("[GUI] Closing")
         try:
             self.controller.shutdown()
         finally:
