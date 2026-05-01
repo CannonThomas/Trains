@@ -95,7 +95,7 @@ DEFAULT_CONSIST_ORDER = ["CAR_A", "CAR_B", "CAR_C", "CAR_D"]
 # -----------------------------
 # Timing
 # -----------------------------
-SWITCH_THROW_SEC = 0.25
+SWITCH_THROW_SEC = 0.07
 COUPLER_PULSE_SEC = 0.7
 
 APPROACH_SEC = 1.0
