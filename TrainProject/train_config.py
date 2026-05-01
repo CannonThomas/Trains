@@ -1,6 +1,6 @@
 # train_config.py
 
-MOCK_MODE = True
+MOCK_MODE = False
 
 # -----------------------------
 # Layout
