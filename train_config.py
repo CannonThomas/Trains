@@ -45,6 +45,11 @@ SWITCH_PINS = {
 SWITCH_SIDING_DIR   = {"S1": "LEFT", "S2": "LEFT", "S3": "LEFT"}
 SWITCH_PULSE_SEC    = 0.001   # 1 ms solenoid impulse
 
+# ── SPI bit-bang pins (shared by all 4 readers) ───────────────────────────────
+SPI_MOSI = 10   # Pin 19
+SPI_MISO = 9    # Pin 21
+SPI_SCLK = 11   # Pin 23
+
 # ── RFID readers ──────────────────────────────────────────────────────────────
 # 4 × RC522 on shared SPI bus:
 #   MOSI → GPIO10 (Pin 19), MISO → GPIO9 (Pin 21), SCLK → GPIO11 (Pin 23)
