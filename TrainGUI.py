@@ -8,6 +8,12 @@ from TrainController import TrainController
 WINDOW_TITLE = "Train Sorter"
 WINDOW_SIZE  = "860x900"
 
+CAR_COLORS = {
+    "CAR_A": "#e74c3c",   # red
+    "CAR_B": "#2980b9",   # blue
+    "CAR_C": "#e67e22",   # orange
+}
+
 
 class TrainSorterGUI:
     def __init__(self, root):
@@ -90,11 +96,14 @@ class TrainSorterGUI:
         f4.pack(fill="x", **pad)
 
         self._track_vars_display = {}
+        self._track_labels = {}
         for track in (1, 2, 3):
             var = tk.StringVar(value=f"Track {track}: empty")
             self._track_vars_display[track] = var
-            ttk.Label(f4, textvariable=var, width=22, relief="groove",
-                      anchor="center", padding=4).pack(side="left", padx=6)
+            lbl = tk.Label(f4, textvariable=var, width=22, relief="groove",
+                           anchor="center", pady=4, font=("TkDefaultFont", 10, "bold"))
+            lbl.pack(side="left", padx=6)
+            self._track_labels[track] = lbl
 
         # ── Manual Switch Controls ────────────────────────────────────────────
         f5 = ttk.LabelFrame(self.root, text="Manual Switch Control", padding=8)
@@ -162,9 +171,12 @@ class TrainSorterGUI:
                       foreground="gray").pack(side="left", padx=4)
         else:
             for i, car in enumerate(self.controller.car_order):
-                lbl = ttk.Label(self._consist_frame,
-                                text=f"{i+1}. {car}",
-                                relief="groove", padding=4)
+                color = CAR_COLORS.get(car, "#555555")
+                lbl = tk.Label(self._consist_frame,
+                               text=f"{i+1}. {car}",
+                               bg=color, fg="white",
+                               relief="groove", padx=8, pady=4,
+                               font=("TkDefaultFont", 10, "bold"))
                 lbl.pack(side="left", padx=3)
         self._update_next_car_label()
 
@@ -216,6 +228,8 @@ class TrainSorterGUI:
     def _on_drop_confirmed(self, car_name, track):
         def _update():
             self._track_vars_display[track].set(f"Track {track}: {car_name}")
+            color = CAR_COLORS.get(car_name, "#27ae60")
+            self._track_labels[track].configure(bg=color, fg="white")
             self._refresh_consist_display()
         self.root.after(0, _update)
 
@@ -243,6 +257,7 @@ class TrainSorterGUI:
         self.controller.reset()
         for t in (1, 2, 3):
             self._track_vars_display[t].set(f"Track {t}: empty")
+            self._track_labels[t].configure(bg="SystemButtonFace", fg="black")
         self.root.after(0, self._refresh_consist_display)
 
     def _toggle_mock(self):
