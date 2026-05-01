@@ -1,0 +1,6 @@
+{
+  "CAR_A": {"rfid": "72BC0310", "default_track": 1},
+  "CAR_B": {"rfid": "424E1010", "default_track": 2},
+  "CAR_C": {"rfid": "F2BE0410", "default_track": 3},
+  "CAR_D": {"rfid": "B2D21710", "default_track": 1}
+}

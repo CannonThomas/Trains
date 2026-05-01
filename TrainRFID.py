@@ -198,12 +198,11 @@ class TrainRFID:
     def _ensure_ready(self) -> bool:
         if self._ready:
             return True
-        if train_config.MOCK_MODE:
+        if train_config.MOCK_MODE or not _SPIDEV_OK or not _LGPIO_OK:
+            if not _SPIDEV_OK or not _LGPIO_OK:
+                self.logger("[RFID] spidev/lgpio not available — running in mock mode")
             self._ready = True
             return True
-        if not _SPIDEV_OK or not _LGPIO_OK:
-            self.logger("[RFID] spidev or lgpio not installed")
-            return False
         try:
             self._chip = lgpio.gpiochip_open(0)
 
@@ -240,12 +239,15 @@ class TrainRFID:
 
     # ── Scanning ─────────────────────────────────────────────────────────────
 
+    def _is_mock(self) -> bool:
+        return train_config.MOCK_MODE or not _SPIDEV_OK or not _LGPIO_OK
+
     def scan_all(self, timeout_sec: float = 0.25):
         """
         Poll all readers until a tag is found or timeout expires.
         Returns (reader_index, uid_str) or (None, None).
         """
-        if train_config.MOCK_MODE:
+        if self._is_mock():
             if self.mock_queue:
                 idx, uid = self.mock_queue.popleft()
                 self.logger(f"[MOCK RFID] {train_config.RFID_READERS[idx]['name']}: {uid}")
@@ -267,7 +269,7 @@ class TrainRFID:
 
     def scan_reader(self, reader_idx: int, timeout_sec: float = 0.25):
         """Poll a single reader. Returns uid_str or None."""
-        if train_config.MOCK_MODE:
+        if self._is_mock():
             if self.mock_queue:
                 idx, uid = self.mock_queue.popleft()
                 if idx == reader_idx:
