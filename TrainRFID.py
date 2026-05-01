@@ -13,8 +13,28 @@
 #   pip install spidev lgpio
 
 import time
+import array
+import fcntl
 from collections import deque
 import train_config
+
+# SPI ioctl constants (from Linux kernel spi/spidev.h)
+_SPI_IOC_RD_MODE = 0x80016B01
+_SPI_IOC_WR_MODE = 0x40016B01
+_SPI_NO_CS       = 0x40
+
+def _spi_set_no_cs(spi):
+    """Disable hardware CS assertion via ioctl — fallback when spi.no_cs is unsupported."""
+    try:
+        spi.no_cs = True
+        return
+    except Exception:
+        pass
+    # Older spidev: set SPI_NO_CS bit directly via ioctl
+    buf = array.array('B', [0])
+    fcntl.ioctl(spi.fileno(), _SPI_IOC_RD_MODE, buf, True)
+    buf[0] = buf[0] | _SPI_NO_CS
+    fcntl.ioctl(spi.fileno(), _SPI_IOC_WR_MODE, buf, True)
 
 try:
     import spidev
@@ -210,7 +230,7 @@ class TrainRFID:
             self._spi.open(0, 0)            # SPI bus 0, device 0
             self._spi.max_speed_hz = 1_000_000
             self._spi.mode = 0
-            self._spi.no_cs = True          # we drive all CS lines manually
+            _spi_set_no_cs(self._spi)       # we drive all CS lines manually
 
             for cfg in train_config.RFID_READERS:
                 cs, rst = cfg["cs"], cfg["rst"]
