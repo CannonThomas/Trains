@@ -1,7 +1,7 @@
 import lgpio, time
 
 CHIP = 0  # try chip 0 instead of 4
-PIN = 12
+PIN = 13
 
 h = lgpio.gpiochip_open(CHIP)
 lgpio.gpio_claim_output(h, PIN, 0)
