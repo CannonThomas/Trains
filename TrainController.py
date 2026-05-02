@@ -4,6 +4,7 @@ import time
 import train_config
 from TrainIO import TrainIO
 from TrainRFID import TrainRFID
+from TrainTrack import TrainTrack
 
 DROP_CONFIRM_TIMEOUT = 30.0   # seconds to wait for track RFID before giving up
 
@@ -13,6 +14,7 @@ class TrainController:
         self.logger = logger
         self.io    = TrainIO(logger=self.log)
         self.rfid  = TrainRFID(logger=self.log)
+        self.track = TrainTrack(logger=self.log)
 
         # Consist: ordered front→back as scanned by entry reader
         self.car_order: list = []
@@ -233,6 +235,10 @@ class TrainController:
     def shutdown(self):
         self._scanning = False
         self._manual_confirm_event.set()
+        try:
+            self.track.cleanup()
+        except Exception as e:
+            self.log(f"[WARN] Track cleanup: {e}")
         try:
             self.io.cleanup()
         except Exception as e:

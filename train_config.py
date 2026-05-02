@@ -67,3 +67,14 @@ RFID_READERS = [
     {"name": "RFID3", "cs": 25, "rst": 27},  # SDA→GPIO25 (Pin 22), RST→GPIO27 (Pin 13)
     {"name": "RFID4", "cs": 24, "rst": 17},  # SDA→GPIO24 (Pin 18), RST→GPIO17 (Pin 11)
 ]
+
+# ── Track power (L298 H-bridge, PWM speed control) ────────────────────────────
+# 15V supply → L298 → ~12V at rails (L298 has ~2-3V internal dropout).
+# To cap output near 12V, we limit max PWM duty cycle.
+TRACK_ENA_PIN     = 18   # Pin 12 — PWM speed (hardware-PWM capable)
+TRACK_IN1_PIN     = 23   # Pin 16 — direction A
+TRACK_IN2_PIN     = 4    # Pin 7  — direction B
+TRACK_PWM_FREQ    = 20000   # 20 kHz — above audible range
+TRACK_MAX_DUTY    = 92      # % cap so 15V-in → ~12V out (L298 dropout ~2V)
+TRACK_INPUT_VOLTS = 15.0
+TRACK_TARGET_VOLTS = 12.0

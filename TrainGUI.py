@@ -126,6 +126,39 @@ class TrainSorterGUI:
                    command=lambda: self.run_bg(self.controller.manual_all_straight)
                    ).pack(side="left", padx=16)
 
+        # ── Track Power (L298 H-bridge) ───────────────────────────────────────
+        f_track = ttk.LabelFrame(self.root, text="Track Power", padding=8)
+        f_track.pack(fill="x", **pad)
+
+        dir_row = ttk.Frame(f_track)
+        dir_row.pack(fill="x")
+        ttk.Label(dir_row, text="Direction:").pack(side="left", padx=(0, 6))
+        ttk.Button(dir_row, text="◀ REV",
+                   command=lambda: self.run_bg(
+                       lambda: self.controller.track.set_direction("REV"))
+                   ).pack(side="left", padx=2)
+        ttk.Button(dir_row, text="■ STOP",
+                   command=lambda: self.run_bg(
+                       self.controller.track.stop)
+                   ).pack(side="left", padx=2)
+        ttk.Button(dir_row, text="FWD ▶",
+                   command=lambda: self.run_bg(
+                       lambda: self.controller.track.set_direction("FWD"))
+                   ).pack(side="left", padx=2)
+
+        speed_row = ttk.Frame(f_track)
+        speed_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(speed_row, text="Speed:").pack(side="left", padx=(0, 6))
+        self._speed_var = tk.IntVar(value=0)
+        self._speed_label_var = tk.StringVar(value="0%  (~0.0V)")
+        speed_scale = ttk.Scale(
+            speed_row, from_=0, to=100, orient="horizontal",
+            variable=self._speed_var, command=self._on_speed_change,
+        )
+        speed_scale.pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Label(speed_row, textvariable=self._speed_label_var,
+                  width=14).pack(side="left", padx=4)
+
         # ── RFID Test ─────────────────────────────────────────────────────────
         f6 = ttk.LabelFrame(self.root, text="RFID Test", padding=8)
         f6.pack(fill="x", **pad)
@@ -259,6 +292,15 @@ class TrainSorterGUI:
             self._track_vars_display[t].set(f"Track {t}: empty")
             self._track_labels[t].configure(bg="SystemButtonFace", fg="black")
         self.root.after(0, self._refresh_consist_display)
+
+    def _on_speed_change(self, _val):
+        pct = int(float(_val))
+        # Estimate output voltage: duty * (Vin - L298 dropout)
+        max_duty = train_config.TRACK_MAX_DUTY / 100.0
+        duty = pct / 100.0 * max_duty
+        est_v = duty * (train_config.TRACK_INPUT_VOLTS - 2.0)
+        self._speed_label_var.set(f"{pct}%  (~{est_v:.1f}V)")
+        self.run_bg(lambda p=pct: self.controller.track.set_speed(p))
 
     def _toggle_mock(self):
         train_config.MOCK_MODE = self._mock_var.get()
