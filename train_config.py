@@ -43,7 +43,7 @@ SWITCH_PINS = {
 # Which direction diverts toward the SIDING for each switch.
 # Flip "LEFT" → "RIGHT" if a switch is physically wired the other way.
 SWITCH_SIDING_DIR   = {"S1": "LEFT", "S2": "LEFT", "S3": "LEFT"}
-SWITCH_PULSE_SEC    = 0.015   # 15 ms solenoid impulse
+SWITCH_PULSE_SEC    = 0.250   # 250 ms solenoid impulse
 
 # RFID1 = entry reader (scans consist order)
 # RFID2/3/4 = end of Track 1/2/3 (confirm drop)
