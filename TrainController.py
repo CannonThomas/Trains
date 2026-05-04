@@ -224,6 +224,12 @@ class TrainController:
         if uid:
             car = self.rfid.identify_car(uid)
             self.log(f"[TEST] {name}: {uid} → {car or 'unregistered'}")
+            # If a track-end reader detected a known car, mark that track as full
+            if car and reader_idx in (1, 2, 3):
+                track = reader_idx  # RFID2→T1, RFID3→T2, RFID4→T3
+                self.track_contents[track] = car
+                if self.on_drop_confirmed:
+                    self.on_drop_confirmed(car, track)
         else:
             self.log(f"[TEST] {name}: no tag detected")
 
