@@ -39,73 +39,70 @@ class TrainTrack:
 
     # ── Speed (0..100%) ───────────────────────────────────────────────────────
 
+    # ── Sign-magnitude PWM ──────────────────────────────────────────────────
+    # ENA tied HIGH permanently. Direction determined by which IN pin gets
+    # PWM and which is held LOW:
+    #   FWD: IN1=PWM, IN2=0
+    #   REV: IN1=0,   IN2=PWM
+    #   STOP: ENA=0, IN1=0, IN2=0
+
+    def _pwm(self, pin: int, duty: float):
+        if self.mock_mode:
+            return
+        try:
+            lgpio.tx_pwm(self.chip, pin, train_config.TRACK_PWM_FREQ, duty)
+        except Exception as e:
+            self.logger(f"[TRACK] tx_pwm({pin}) err: {e}")
+
+    def _pwm_off(self, pin: int):
+        if self.mock_mode:
+            return
+        try:
+            lgpio.tx_pwm(self.chip, pin, train_config.TRACK_PWM_FREQ, 0)
+        except Exception:
+            pass
+        try:
+            lgpio.gpio_write(self.chip, pin, 0)
+        except Exception:
+            pass
+
     def set_speed(self, pct: int):
         pct = max(0, min(100, int(pct)))
         self.speed_pct = pct
-        # Scale user 0..100 → 0..TRACK_MAX_DUTY (caps voltage at ~12V)
         duty = pct * train_config.TRACK_MAX_DUTY / 100.0
 
         if self.mock_mode:
             self.logger(f"[MOCK TRACK] speed={pct}% duty={duty:.1f}% dir={self.direction}")
             return
 
-        if self.direction == "STOP":
-            # Direction stopped — keep PWM at 0 but don't modify saved speed
-            self._set_duty(0)
-        else:
-            self._set_duty(duty)
+        in1 = train_config.TRACK_IN1_PIN
+        in2 = train_config.TRACK_IN2_PIN
 
-    def _set_duty(self, duty: float):
-        """Drive PWM on ENA at given duty (0..100). Uses tx_pwm only — never
-        falls back to gpio_write, which can leave lgpio in a state where the
-        next tx_pwm call silently does nothing."""
-        if self.mock_mode:
-            return
-        try:
-            lgpio.tx_pwm(self.chip, train_config.TRACK_ENA_PIN,
-                         train_config.TRACK_PWM_FREQ, duty)
-            self._pwm_active = (duty > 0)
-        except Exception as e:
-            self.logger(f"[TRACK] tx_pwm err: {e}")
-
-    # ── Direction ─────────────────────────────────────────────────────────────
+        if self.direction == "FWD":
+            self._pwm_off(in2)
+            self._pwm(in1, duty)
+            lgpio.gpio_write(self.chip, train_config.TRACK_ENA_PIN, 1)
+        elif self.direction == "REV":
+            self._pwm_off(in1)
+            self._pwm(in2, duty)
+            lgpio.gpio_write(self.chip, train_config.TRACK_ENA_PIN, 1)
+        else:  # STOP
+            self._pwm_off(in1)
+            self._pwm_off(in2)
+            lgpio.gpio_write(self.chip, train_config.TRACK_ENA_PIN, 0)
 
     def set_direction(self, direction: str):
         direction = direction.upper()
         if direction not in ("FWD", "REV", "STOP"):
             self.logger(f"[TRACK] invalid direction: {direction}")
             return
-
-        prev_dir = self.direction
+        prev = self.direction
         self.direction = direction
-
-        if self.mock_mode:
-            self.logger(f"[MOCK TRACK] dir={direction}")
-            return
-
-        # Just flip IN1/IN2 — leave PWM alone. The L298 handles direction
-        # change while ENA is still PWMing; brief shoot-through is harmless
-        # at our duty/freq.
-        if direction == "FWD":
-            lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 1)
-            lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 0)
-            self.logger(f"[TRACK] FWD  IN1=1 IN2=0  (was {prev_dir}, speed={self.speed_pct}%)")
-        elif direction == "REV":
-            lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 0)
-            lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 1)
-            self.logger(f"[TRACK] REV  IN1=0 IN2=1  (was {prev_dir}, speed={self.speed_pct}%)")
-        else:  # STOP
-            lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 0)
-            lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 0)
-            self._set_duty(0)
-            self.logger(f"[TRACK] STOP IN1=0 IN2=0 (speed kept at {self.speed_pct}%)")
-            return
-
-        # Re-apply current speed in the new direction
+        self.logger(f"[TRACK] {prev} -> {direction} (speed={self.speed_pct}%)")
+        # set_speed handles all the pin/PWM work
         self.set_speed(self.speed_pct)
 
     def stop(self):
-        # Stop PWM and direction, but PRESERVE saved speed so REV/FWD resumes.
         self.set_direction("STOP")
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
