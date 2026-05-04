@@ -5,8 +5,20 @@ from tkinter import ttk, messagebox
 import train_config
 from TrainController import TrainController
 
-WINDOW_TITLE = "Train Sorter"
-WINDOW_SIZE  = "860x900"
+WINDOW_TITLE = "Train Sorter Control"
+WINDOW_SIZE  = "1000x980"
+
+# ── Theme palette ────────────────────────────────────────────────────────────
+BG_DARK      = "#1e272e"   # window bg
+BG_PANEL     = "#2f3640"   # frame bg
+BG_CARD      = "#353b48"   # tile bg
+FG_TEXT      = "#f5f6fa"   # primary text
+FG_MUTED     = "#7f8fa6"   # muted text
+ACCENT_BLUE  = "#3498db"
+ACCENT_GREEN = "#1abc9c"
+ACCENT_GOLD  = "#f39c12"
+ACCENT_RED   = "#e74c3c"
+BORDER_LINE  = "#576574"
 
 CAR_COLORS = {
     "Red":    "#e74c3c",
@@ -15,11 +27,61 @@ CAR_COLORS = {
 }
 
 
+def _apply_theme(root):
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    root.configure(bg=BG_DARK)
+
+    style.configure(".",
+        background=BG_PANEL, foreground=FG_TEXT,
+        fieldbackground=BG_CARD, bordercolor=BORDER_LINE,
+        font=("Helvetica", 10))
+    style.configure("TFrame", background=BG_PANEL)
+    style.configure("TLabel", background=BG_PANEL, foreground=FG_TEXT)
+    style.configure("Muted.TLabel", foreground=FG_MUTED)
+    style.configure("Header.TLabel",
+        background=BG_DARK, foreground=ACCENT_BLUE,
+        font=("Helvetica", 18, "bold"))
+    style.configure("SubHeader.TLabel",
+        background=BG_DARK, foreground=FG_MUTED,
+        font=("Helvetica", 10, "italic"))
+    style.configure("TLabelframe",
+        background=BG_PANEL, foreground=ACCENT_GREEN,
+        bordercolor=BORDER_LINE, relief="solid", borderwidth=1)
+    style.configure("TLabelframe.Label",
+        background=BG_PANEL, foreground=ACCENT_GREEN,
+        font=("Helvetica", 11, "bold"))
+    style.configure("TButton",
+        background=BG_CARD, foreground=FG_TEXT,
+        bordercolor=BORDER_LINE, padding=(10, 6),
+        font=("Helvetica", 10, "bold"))
+    style.map("TButton",
+        background=[("active", ACCENT_BLUE), ("pressed", ACCENT_BLUE)],
+        foreground=[("active", "white")])
+    style.configure("Go.TButton", background=ACCENT_GREEN, foreground="white")
+    style.map("Go.TButton", background=[("active", "#16a085")])
+    style.configure("Stop.TButton", background=ACCENT_RED, foreground="white")
+    style.map("Stop.TButton", background=[("active", "#c0392b")])
+    style.configure("Warn.TButton", background=ACCENT_GOLD, foreground="white")
+    style.map("Warn.TButton", background=[("active", "#d68910")])
+    style.configure("TCheckbutton", background=BG_PANEL, foreground=FG_TEXT)
+    style.configure("TCombobox",
+        fieldbackground=BG_CARD, background=BG_CARD, foreground=FG_TEXT,
+        bordercolor=BORDER_LINE, arrowcolor=FG_TEXT)
+    style.configure("Horizontal.TScale",
+        background=BG_PANEL, troughcolor=BG_CARD)
+
+
 class TrainSorterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title(WINDOW_TITLE)
         self.root.geometry(WINDOW_SIZE)
+        _apply_theme(root)
 
         self.log_text = None
         self._pending_logs = []
@@ -40,17 +102,28 @@ class TrainSorterGUI:
     # ── Build UI ──────────────────────────────────────────────────────────────
 
     def _build_widgets(self):
-        pad = {"padx": 10, "pady": 5}
+        pad = {"padx": 12, "pady": 6}
+
+        # ── Title bar ─────────────────────────────────────────────────────────
+        title_bar = tk.Frame(self.root, bg=BG_DARK)
+        title_bar.pack(fill="x", padx=12, pady=(10, 0))
+        ttk.Label(title_bar, text="🚂  TRAIN SORTER CONTROL",
+                  style="Header.TLabel").pack(side="left")
+        ttk.Label(title_bar, text="  ·  Pi 5 + RC522 + L298",
+                  style="SubHeader.TLabel").pack(side="left", padx=(8, 0))
 
         # ── STEP 1: Scan ──────────────────────────────────────────────────────
-        f1 = ttk.LabelFrame(self.root, text="Step 1 — Scan Car Order (drive past entry reader)", padding=8)
+        f1 = ttk.LabelFrame(self.root, text="① Scan Car Order — drive past entry reader", padding=10)
         f1.pack(fill="x", **pad)
 
         btn_row = ttk.Frame(f1)
         btn_row.pack(fill="x")
-        ttk.Button(btn_row, text="▶  Start Scan", command=self._start_scan).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="■  Stop Scan",  command=self._stop_scan).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="Clear",         command=self._clear_consist).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="▶  Start Scan", style="Go.TButton",
+                   command=self._start_scan).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="■  Stop Scan", style="Stop.TButton",
+                   command=self._stop_scan).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="✖  Clear", style="Warn.TButton",
+                   command=self._clear_consist).pack(side="left", padx=4)
 
         ttk.Label(f1, text="Consist (front → back):").pack(anchor="w", pady=(6, 0))
         self._consist_frame = ttk.Frame(f1)
@@ -58,7 +131,7 @@ class TrainSorterGUI:
         self._refresh_consist_display()
 
         # ── STEP 2: Assign Tracks ─────────────────────────────────────────────
-        f2 = ttk.LabelFrame(self.root, text="Step 2 — Assign Destination Tracks", padding=8)
+        f2 = ttk.LabelFrame(self.root, text="② Assign Destination Tracks", padding=10)
         f2.pack(fill="x", **pad)
 
         self._dest_inner = None
@@ -67,102 +140,113 @@ class TrainSorterGUI:
         self._rebuild_dest_panel()
 
         # ── STEP 3: Sort ──────────────────────────────────────────────────────
-        f3 = ttk.LabelFrame(self.root, text="Step 3 — Sort", padding=8)
+        f3 = ttk.LabelFrame(self.root, text="③ Sort", padding=10)
         f3.pack(fill="x", **pad)
 
-        status_lbl = ttk.Label(
+        status_lbl = tk.Label(
             f3, textvariable=self._status_var,
-            relief="sunken", anchor="w", padding=6,
-            wraplength=780, justify="left",
-            font=("TkDefaultFont", 11, "bold")
-        )
+            anchor="w", padx=10, pady=8,
+            wraplength=900, justify="left",
+            bg=BG_CARD, fg=ACCENT_GOLD,
+            relief="flat", borderwidth=0,
+            font=("Helvetica", 11, "bold"))
         status_lbl.pack(fill="x", pady=(0, 6))
 
-        ttk.Label(f3, textvariable=self._next_car_var).pack(anchor="w")
+        ttk.Label(f3, textvariable=self._next_car_var,
+                  style="Muted.TLabel").pack(anchor="w")
 
         sort_btns = ttk.Frame(f3)
-        sort_btns.pack(fill="x", pady=4)
-        ttk.Button(sort_btns, text="🔀  Fire Switch & Wait",
+        sort_btns.pack(fill="x", pady=8)
+        ttk.Button(sort_btns, text="🔀  Fire Switch & Wait", style="Go.TButton",
                    command=self._fire_switch).pack(side="left", padx=4)
         ttk.Button(sort_btns, text="✓  Manual Confirm Drop",
                    command=self.controller.manual_confirm_drop).pack(side="left", padx=4)
-        ttk.Button(sort_btns, text="Skip Car",
+        ttk.Button(sort_btns, text="⏭  Skip Car",
                    command=self._skip_car).pack(side="left", padx=4)
-        ttk.Button(sort_btns, text="Reset All",
-                   command=self._reset).pack(side="left", padx=20)
+        ttk.Button(sort_btns, text="↺  Reset All", style="Stop.TButton",
+                   command=self._reset).pack(side="right", padx=4)
 
         # ── Track Status ──────────────────────────────────────────────────────
-        f4 = ttk.LabelFrame(self.root, text="Track Status", padding=8)
+        f4 = ttk.LabelFrame(self.root, text="🚉  Track Status", padding=10)
         f4.pack(fill="x", **pad)
 
         self._track_vars_display = {}
         self._track_labels = {}
+        tile_row = ttk.Frame(f4)
+        tile_row.pack(fill="x", expand=True)
         for track in (1, 2, 3):
-            var = tk.StringVar(value=f"Track {track}\nEMPTY")
+            var = tk.StringVar(value=f"TRACK {track}\n\n— empty —")
             self._track_vars_display[track] = var
-            lbl = tk.Label(f4, textvariable=var, width=18, relief="ridge", borderwidth=3,
-                           anchor="center", pady=10,
-                           bg="#ecf0f1", fg="#7f8c8d",
-                           font=("TkDefaultFont", 11, "bold"))
-            lbl.pack(side="left", padx=6, ipady=4)
+            lbl = tk.Label(tile_row, textvariable=var, width=20, height=4,
+                           relief="flat", borderwidth=2,
+                           anchor="center",
+                           bg=BG_CARD, fg=FG_MUTED,
+                           highlightthickness=2, highlightbackground=BORDER_LINE,
+                           font=("Helvetica", 12, "bold"))
+            lbl.pack(side="left", padx=8, ipady=8, fill="both", expand=True)
             self._track_labels[track] = lbl
 
         # ── Manual Switch Controls ────────────────────────────────────────────
-        f5 = ttk.LabelFrame(self.root, text="Manual Switch Control", padding=8)
+        f5 = ttk.LabelFrame(self.root, text="⇄  Manual Switch Control", padding=10)
         f5.pack(fill="x", **pad)
 
         for sw in ("S1", "S2", "S3"):
             row = ttk.Frame(f5)
-            row.pack(side="left", padx=10)
-            ttk.Label(row, text=sw, width=4).pack(side="left")
-            ttk.Button(row, text="LEFT",
+            row.pack(side="left", padx=12)
+            ttk.Label(row, text=sw, width=4,
+                      font=("Helvetica", 11, "bold")).pack(side="left")
+            ttk.Button(row, text="◀ LEFT",
                        command=lambda s=sw: self.run_bg(
                            lambda sw=s: self.controller.manual_pulse(sw, "LEFT")
                        )).pack(side="left", padx=2)
-            ttk.Button(row, text="RIGHT",
+            ttk.Button(row, text="RIGHT ▶",
                        command=lambda s=sw: self.run_bg(
                            lambda sw=s: self.controller.manual_pulse(sw, "RIGHT")
                        )).pack(side="left", padx=2)
 
-        ttk.Button(f5, text="All Straight",
+        ttk.Button(f5, text="↑  All Straight", style="Go.TButton",
                    command=lambda: self.run_bg(self.controller.manual_all_straight)
-                   ).pack(side="left", padx=16)
+                   ).pack(side="right", padx=8)
 
         # ── Track Power (L298 H-bridge) ───────────────────────────────────────
-        f_track = ttk.LabelFrame(self.root, text="Track Power", padding=8)
+        f_track = ttk.LabelFrame(self.root, text="⚡  Track Power", padding=10)
         f_track.pack(fill="x", **pad)
 
         dir_row = ttk.Frame(f_track)
         dir_row.pack(fill="x")
-        ttk.Label(dir_row, text="Direction:").pack(side="left", padx=(0, 6))
+        ttk.Label(dir_row, text="Direction:",
+                  font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 8))
         self._paused = False
         self._saved_dir   = "STOP"
         self._saved_speed = 0
-        ttk.Button(dir_row, text="◀ REV",
+        ttk.Button(dir_row, text="◀  REV",
                    command=lambda: self._set_dir("REV")
-                   ).pack(side="left", padx=2)
-        self._pause_btn = ttk.Button(dir_row, text="■ PAUSE",
+                   ).pack(side="left", padx=3)
+        self._pause_btn = ttk.Button(dir_row, text="■  PAUSE", style="Stop.TButton",
                                      command=self._toggle_pause)
-        self._pause_btn.pack(side="left", padx=2)
-        ttk.Button(dir_row, text="FWD ▶",
+        self._pause_btn.pack(side="left", padx=3)
+        ttk.Button(dir_row, text="FWD  ▶", style="Go.TButton",
                    command=lambda: self._set_dir("FWD")
-                   ).pack(side="left", padx=2)
+                   ).pack(side="left", padx=3)
 
         speed_row = ttk.Frame(f_track)
-        speed_row.pack(fill="x", pady=(6, 0))
-        ttk.Label(speed_row, text="Speed:").pack(side="left", padx=(0, 6))
+        speed_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(speed_row, text="Speed:",
+                  font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 8))
         self._speed_var = tk.IntVar(value=0)
         self._speed_label_var = tk.StringVar(value="0%  (~0.0V)")
         speed_scale = ttk.Scale(
             speed_row, from_=0, to=100, orient="horizontal",
             variable=self._speed_var, command=self._on_speed_change,
         )
-        speed_scale.pack(side="left", fill="x", expand=True, padx=4)
-        ttk.Label(speed_row, textvariable=self._speed_label_var,
-                  width=14).pack(side="left", padx=4)
+        speed_scale.pack(side="left", fill="x", expand=True, padx=8)
+        tk.Label(speed_row, textvariable=self._speed_label_var, width=14,
+                 bg=BG_CARD, fg=ACCENT_GOLD,
+                 font=("Helvetica", 11, "bold"),
+                 padx=10, pady=4).pack(side="left", padx=4)
 
         # ── RFID Test ─────────────────────────────────────────────────────────
-        f6 = ttk.LabelFrame(self.root, text="RFID Test", padding=8)
+        f6 = ttk.LabelFrame(self.root, text="📡  RFID Test", padding=10)
         f6.pack(fill="x", **pad)
 
         reader_labels = ["Entry (RFID1)", "Track 1 end (RFID2)",
@@ -190,10 +274,14 @@ class TrainSorterGUI:
                         command=self._toggle_mock).pack(side="left")
 
         # ── Log ───────────────────────────────────────────────────────────────
-        f7 = ttk.LabelFrame(self.root, text="Log", padding=8)
+        f7 = ttk.LabelFrame(self.root, text="📜  Log", padding=10)
         f7.pack(fill="both", expand=True, **pad)
 
-        self.log_text = tk.Text(f7, wrap="word", height=12)
+        self.log_text = tk.Text(f7, wrap="word", height=10,
+                                bg="#1e272e", fg="#dfe6e9",
+                                insertbackground=FG_TEXT,
+                                relief="flat", borderwidth=0,
+                                font=("Menlo", 10))
         sb = ttk.Scrollbar(f7, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=sb.set)
         self.log_text.pack(side="left", fill="both", expand=True)
@@ -265,10 +353,11 @@ class TrainSorterGUI:
 
     def _on_drop_confirmed(self, car_name, track):
         def _update():
-            self._track_vars_display[track].set(f"Track {track}\n● {car_name} ●\nFULL")
+            self._track_vars_display[track].set(f"TRACK {track}\n\n● {car_name.upper()} ●\nFULL")
             color = CAR_COLORS.get(car_name, "#27ae60")
             self._track_labels[track].configure(
-                bg=color, fg="white", relief="raised", borderwidth=4)
+                bg=color, fg="white",
+                highlightbackground="white", highlightthickness=3)
             self._refresh_consist_display()
         self.root.after(0, _update)
 
@@ -295,9 +384,10 @@ class TrainSorterGUI:
     def _reset(self):
         self.controller.reset()
         for t in (1, 2, 3):
-            self._track_vars_display[t].set(f"Track {t}\nEMPTY")
+            self._track_vars_display[t].set(f"TRACK {t}\n\n— empty —")
             self._track_labels[t].configure(
-                bg="#ecf0f1", fg="#7f8c8d", relief="ridge", borderwidth=3)
+                bg=BG_CARD, fg=FG_MUTED,
+                highlightbackground=BORDER_LINE, highlightthickness=2)
         self.root.after(0, self._refresh_consist_display)
 
     def _set_dir(self, direction: str):
