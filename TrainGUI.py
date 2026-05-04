@@ -173,6 +173,9 @@ class TrainSorterGUI:
                 )
             ).pack(side="left", padx=4)
 
+        ttk.Button(f6, text="Diagnose All",
+                   command=lambda: self.run_bg(self.controller.rfid.diagnose)
+                   ).pack(side="left", padx=8)
         ttk.Button(f6, text="Show State",
                    command=self.controller.show_state).pack(side="left", padx=8)
 

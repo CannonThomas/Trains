@@ -172,6 +172,11 @@ class _MFRC522:
                 return (self.MI_OK, data[:4])
         return (self.MI_ERR, [])
 
+    def read_version(self) -> int:
+        """Read VersionReg (0x37). Returns 0x91/0x92 for genuine MFRC522,
+        0x88 for clone, 0x00 or 0xFF if chip is dead/disconnected."""
+        return self._read(0x37)
+
     def detect_tag(self):
         """Return 8-char hex UID string, or None if no tag present."""
         if self._request() != self.MI_OK:
@@ -282,6 +287,30 @@ class TrainRFID:
                 return uid
             time.sleep(0.02)
         return None
+
+    def diagnose(self) -> list:
+        """Probe each reader's VersionReg. Returns list of (name, version_byte, status)."""
+        results = []
+        if self._is_mock() or not self._ensure_ready():
+            return results
+        for i, reader in enumerate(self._readers):
+            name = train_config.RFID_READERS[i]["name"]
+            try:
+                v = reader.read_version()
+                if v in (0x91, 0x92):
+                    status = "OK (genuine MFRC522)"
+                elif v == 0x88:
+                    status = "OK (clone)"
+                elif v in (0x00, 0xFF):
+                    status = "DEAD/UNWIRED"
+                else:
+                    status = f"unknown (0x{v:02X})"
+                self.logger(f"[RFID DIAG] {name}: ver=0x{v:02X} -> {status}")
+                results.append((name, v, status))
+            except Exception as e:
+                self.logger(f"[RFID DIAG] {name}: ERROR {e}")
+                results.append((name, None, "exception"))
+        return results
 
     # ── Roster lookups ────────────────────────────────────────────────────────
 
