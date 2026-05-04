@@ -99,8 +99,24 @@ class TrainTrack:
         lgpio.gpio_write(self.chip, ena, 1)
 
     def set_speed(self, pct: int):
+        """Update PWM duty ONLY — never touches direction pins or ENA.
+        This prevents speed changes from causing transient direction glitches."""
         self.speed_pct = max(0, min(100, int(pct)))
-        self._apply()
+        if self.mock_mode:
+            self.logger(f"[MOCK TRACK] speed={self.speed_pct}% dir={self.direction}")
+            return
+
+        duty = self.speed_pct * train_config.TRACK_MAX_DUTY / 100.0
+        in1 = train_config.TRACK_IN1_PIN
+        in2 = train_config.TRACK_IN2_PIN
+
+        # Only adjust the active direction's PWM pin. Leave the other pin and
+        # ENA exactly where set_direction last put them.
+        if self.direction == "FWD":
+            self._pwm(in1, duty)
+        elif self.direction == "REV":
+            self._pwm(in2, duty)
+        # STOP: do nothing — slider has no effect until a direction is chosen
 
     def set_direction(self, direction: str):
         direction = direction.upper()
