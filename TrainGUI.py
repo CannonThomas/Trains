@@ -21,16 +21,23 @@ ACCENT_RED   = "#e74c3c"
 BORDER_LINE  = "#576574"
 
 CAR_COLORS = {
-    "Santa Fe": "#b71c1c",   # deep Santa Fe warbonnet red
-    "Lackawanna": "#455a64",  # slate gray (DL&W diesel livery)
-    "Triangle": "#e67e22",   # orange
+    "Santa Fe":   "#c0392b",   # red (warbonnet body)
+    "Lackawanna": "#4dd0e1",   # light teal
+    "Triangle":   "#c0392b",   # red
+}
+
+# Outline color for each car — distinguishes cars that share a body color
+CAR_OUTLINES = {
+    "Santa Fe":   "#ffffff",   # white outline
+    "Lackawanna": "#ffffff",   # white outline
+    "Triangle":   "#f1c40f",   # yellow outline
 }
 
 # Unicode glyph for each car so it's recognisable beyond color alone
 CAR_ICONS = {
-    "Santa Fe": "✦",   # star — Santa Fe nose emblem vibe
+    "Santa Fe":   "✦",   # star — Santa Fe nose emblem vibe
     "Lackawanna": "◆",   # diamond — DL&W herald shape
-    "Triangle": "▲",   # literal triangle
+    "Triangle":   "▲",   # literal triangle
 }
 
 
@@ -392,13 +399,16 @@ class TrainSorterGUI:
         else:
             for i, car in enumerate(self.controller.car_order):
                 color = CAR_COLORS.get(car, "#555555")
+                outline = CAR_OUTLINES.get(car, "#ffffff")
                 icon = CAR_ICONS.get(car, "■")
                 lbl = tk.Label(self._consist_frame,
                                text=f"{i+1}. {icon} {car}",
                                bg=color, fg="white",
-                               relief="groove", padx=10, pady=6,
+                               relief="flat", padx=10, pady=6,
+                               highlightbackground=outline,
+                               highlightthickness=3,
                                font=("Helvetica", 11, "bold"))
-                lbl.pack(side="left", padx=3)
+                lbl.pack(side="left", padx=4)
         self._update_next_car_label()
 
     def _rebuild_dest_panel(self):
@@ -453,9 +463,10 @@ class TrainSorterGUI:
                 self._track_vars_display[track].set(
                     f"TRACK {track}\n\n{icon}  {car_name.upper()}  {icon}\nFULL")
                 color = CAR_COLORS.get(car_name, "#27ae60")
+                outline = CAR_OUTLINES.get(car_name, "#ffffff")
                 self._track_labels[track].configure(
                     bg=color, fg="white",
-                    highlightbackground="white", highlightthickness=3)
+                    highlightbackground=outline, highlightthickness=4)
             else:
                 # No car detected — reset to empty state
                 self._track_vars_display[track].set(
