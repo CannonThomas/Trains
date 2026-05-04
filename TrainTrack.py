@@ -125,19 +125,48 @@ class TrainTrack:
             return
         prev = self.direction
         if prev == direction:
-            return  # no-op, prevents redundant pulses
+            return
 
-        # Always pass through a STOP state with dead-time before changing
-        # direction. Prevents motor reversal glitches and L298 confusion.
+        # Reversing direction: BRAKE first (both IN HIGH, ENA HIGH) to kill
+        # motor inertia, then disable bridge, then dead-time. Prevents the
+        # motor from coasting backwards into the new direction at low duty.
         if not self.mock_mode and prev != "STOP" and direction != "STOP":
-            self._pwm_off(train_config.TRACK_IN1_PIN)
-            self._pwm_off(train_config.TRACK_IN2_PIN)
-            lgpio.gpio_write(self.chip, train_config.TRACK_ENA_PIN, 0)
-            time.sleep(0.30)  # 300ms dead-time
+            in1 = train_config.TRACK_IN1_PIN
+            in2 = train_config.TRACK_IN2_PIN
+            ena = train_config.TRACK_ENA_PIN
+            # Force both inputs HIGH at full duty → L298 brake mode
+            self._pwm(in1, 100)
+            self._pwm(in2, 100)
+            lgpio.gpio_write(self.chip, ena, 1)
+            time.sleep(0.20)  # 200ms hard brake
+            # Disable bridge
+            lgpio.gpio_write(self.chip, ena, 0)
+            self._pwm_off(in1)
+            self._pwm_off(in2)
+            time.sleep(0.20)  # 200ms dead-time
 
         self.direction = direction
         self.logger(f"[TRACK] {prev} -> {direction} (speed={self.speed_pct}%)")
-        self._apply()
+        self._apply_with_kick()
+
+    def _apply_with_kick(self):
+        """Apply direction; if speed is below 50%, kick at high duty briefly
+        so the motor breaks static friction, then settle to the user's speed."""
+        if self.mock_mode:
+            self._apply()
+            return
+
+        target = self.speed_pct
+        # If user's speed is too low to start cleanly, kick at 80% briefly
+        if self.direction in ("FWD", "REV") and 0 < target < 50:
+            saved = target
+            self.speed_pct = 80
+            self._apply()
+            time.sleep(0.20)
+            self.speed_pct = saved
+            self.set_speed(saved)
+        else:
+            self._apply()
 
     def stop(self):
         # Cuts power but PRESERVES speed_pct so FWD/REV resumes at same speed.
