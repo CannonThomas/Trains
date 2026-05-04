@@ -10,7 +10,7 @@ WINDOW_SIZE  = "860x900"
 
 CAR_COLORS = {
     "Red":    "#e74c3c",
-    "Blue":   "#2980b9",
+    "Yellow": "#f1c40f",
     "Orange": "#e67e22",
 }
 
