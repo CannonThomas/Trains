@@ -98,11 +98,13 @@ class TrainSorterGUI:
         self._track_vars_display = {}
         self._track_labels = {}
         for track in (1, 2, 3):
-            var = tk.StringVar(value=f"Track {track}: empty")
+            var = tk.StringVar(value=f"Track {track}\nEMPTY")
             self._track_vars_display[track] = var
-            lbl = tk.Label(f4, textvariable=var, width=22, relief="groove",
-                           anchor="center", pady=4, font=("TkDefaultFont", 10, "bold"))
-            lbl.pack(side="left", padx=6)
+            lbl = tk.Label(f4, textvariable=var, width=18, relief="ridge", borderwidth=3,
+                           anchor="center", pady=10,
+                           bg="#ecf0f1", fg="#7f8c8d",
+                           font=("TkDefaultFont", 11, "bold"))
+            lbl.pack(side="left", padx=6, ipady=4)
             self._track_labels[track] = lbl
 
         # ── Manual Switch Controls ────────────────────────────────────────────
@@ -263,9 +265,10 @@ class TrainSorterGUI:
 
     def _on_drop_confirmed(self, car_name, track):
         def _update():
-            self._track_vars_display[track].set(f"Track {track}: {car_name}")
+            self._track_vars_display[track].set(f"Track {track}\n● {car_name} ●\nFULL")
             color = CAR_COLORS.get(car_name, "#27ae60")
-            self._track_labels[track].configure(bg=color, fg="white")
+            self._track_labels[track].configure(
+                bg=color, fg="white", relief="raised", borderwidth=4)
             self._refresh_consist_display()
         self.root.after(0, _update)
 
@@ -292,8 +295,9 @@ class TrainSorterGUI:
     def _reset(self):
         self.controller.reset()
         for t in (1, 2, 3):
-            self._track_vars_display[t].set(f"Track {t}: empty")
-            self._track_labels[t].configure(bg="SystemButtonFace", fg="black")
+            self._track_vars_display[t].set(f"Track {t}\nEMPTY")
+            self._track_labels[t].configure(
+                bg="#ecf0f1", fg="#7f8c8d", relief="ridge", borderwidth=3)
         self.root.after(0, self._refresh_consist_display)
 
     def _set_dir(self, direction: str):
