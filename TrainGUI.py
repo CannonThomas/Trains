@@ -133,19 +133,17 @@ class TrainSorterGUI:
         dir_row = ttk.Frame(f_track)
         dir_row.pack(fill="x")
         ttk.Label(dir_row, text="Direction:").pack(side="left", padx=(0, 6))
-        ttk.Button(dir_row, text="◀ REV",
-                   command=lambda: self.run_bg(
-                       lambda: self.controller.track.set_direction("REV"))
-                   ).pack(side="left", padx=2)
         self._paused = False
         self._saved_dir   = "STOP"
         self._saved_speed = 0
+        ttk.Button(dir_row, text="◀ REV",
+                   command=lambda: self._set_dir("REV")
+                   ).pack(side="left", padx=2)
         self._pause_btn = ttk.Button(dir_row, text="■ PAUSE",
                                      command=self._toggle_pause)
         self._pause_btn.pack(side="left", padx=2)
         ttk.Button(dir_row, text="FWD ▶",
-                   command=lambda: self.run_bg(
-                       lambda: self.controller.track.set_direction("FWD"))
+                   command=lambda: self._set_dir("FWD")
                    ).pack(side="left", padx=2)
 
         speed_row = ttk.Frame(f_track)
@@ -298,27 +296,26 @@ class TrainSorterGUI:
             self._track_labels[t].configure(bg="SystemButtonFace", fg="black")
         self.root.after(0, self._refresh_consist_display)
 
+    def _set_dir(self, direction: str):
+        """Direct FWD/REV press — clears pause state and applies new direction."""
+        if self._paused:
+            self._paused = False
+            self._pause_btn.configure(text="■ PAUSE")
+        self.run_bg(lambda d=direction: self.controller.track.set_direction(d))
+
     def _toggle_pause(self):
         if not self._paused:
-            # Save current state and stop
-            self._saved_dir   = self.controller.track.direction
-            self._saved_speed = self.controller.track.speed_pct
+            # Remember direction so resume restores it
+            self._saved_dir = self.controller.track.direction
             self._paused = True
             self._pause_btn.configure(text="▶ RESUME")
             self.run_bg(self.controller.track.stop)
         else:
-            # Restore previous direction and speed
-            saved_dir = self._saved_dir
-            saved_speed = self._saved_speed
+            # Resume — controller preserved speed_pct through stop()
+            saved_dir = self._saved_dir if self._saved_dir in ("FWD", "REV") else "FWD"
             self._paused = False
             self._pause_btn.configure(text="■ PAUSE")
-            def _resume():
-                if saved_dir in ("FWD", "REV"):
-                    self.controller.track.set_direction(saved_dir)
-                self.controller.track.set_speed(saved_speed)
-            self.run_bg(_resume)
-            self._speed_var.set(saved_speed)
-            self._on_speed_change(saved_speed)
+            self.run_bg(lambda d=saved_dir: self.controller.track.set_direction(d))
 
     def _on_speed_change(self, _val):
         pct = int(float(_val))
