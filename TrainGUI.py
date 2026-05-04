@@ -353,11 +353,20 @@ class TrainSorterGUI:
 
     def _on_drop_confirmed(self, car_name, track):
         def _update():
-            self._track_vars_display[track].set(f"TRACK {track}\n\n● {car_name.upper()} ●\nFULL")
-            color = CAR_COLORS.get(car_name, "#27ae60")
-            self._track_labels[track].configure(
-                bg=color, fg="white",
-                highlightbackground="white", highlightthickness=3)
+            if car_name:
+                self._track_vars_display[track].set(
+                    f"TRACK {track}\n\n● {car_name.upper()} ●\nFULL")
+                color = CAR_COLORS.get(car_name, "#27ae60")
+                self._track_labels[track].configure(
+                    bg=color, fg="white",
+                    highlightbackground="white", highlightthickness=3)
+            else:
+                # No car detected — reset to empty state
+                self._track_vars_display[track].set(
+                    f"TRACK {track}\n\n— empty —")
+                self._track_labels[track].configure(
+                    bg=BG_CARD, fg=FG_MUTED,
+                    highlightbackground=BORDER_LINE, highlightthickness=2)
             self._refresh_consist_display()
         self.root.after(0, _update)
 

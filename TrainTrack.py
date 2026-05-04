@@ -74,19 +74,29 @@ class TrainTrack:
         duty = self.speed_pct * train_config.TRACK_MAX_DUTY / 100.0
         in1 = train_config.TRACK_IN1_PIN
         in2 = train_config.TRACK_IN2_PIN
+        ena = train_config.TRACK_ENA_PIN
 
+        # Always disable the bridge first so we can configure IN pins cleanly
+        # without any chance of a brief opposite pulse.
+        lgpio.gpio_write(self.chip, ena, 0)
+
+        if self.direction == "STOP":
+            self._pwm_off(in1)
+            self._pwm_off(in2)
+            return
+
+        # Hard-zero the OPPOSITE pin first, settle, then start PWM on the
+        # active pin, settle, then enable the bridge.
         if self.direction == "FWD":
             self._pwm_off(in2)
+            time.sleep(0.005)
             self._pwm(in1, duty)
-            lgpio.gpio_write(self.chip, train_config.TRACK_ENA_PIN, 1)
-        elif self.direction == "REV":
+        else:  # REV
             self._pwm_off(in1)
+            time.sleep(0.005)
             self._pwm(in2, duty)
-            lgpio.gpio_write(self.chip, train_config.TRACK_ENA_PIN, 1)
-        else:  # STOP
-            self._pwm_off(in1)
-            self._pwm_off(in2)
-            lgpio.gpio_write(self.chip, train_config.TRACK_ENA_PIN, 0)
+        time.sleep(0.010)               # let PWM stabilize
+        lgpio.gpio_write(self.chip, ena, 1)
 
     def set_speed(self, pct: int):
         self.speed_pct = max(0, min(100, int(pct)))
