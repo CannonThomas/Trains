@@ -99,6 +99,9 @@ class TrainSorterGUI:
         self._flush_pending_logs()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        # Always run the live track monitor in the background
+        self.controller.start_track_monitor()
+
     # ── Build UI ──────────────────────────────────────────────────────────────
 
     def _build_widgets(self):
@@ -183,10 +186,9 @@ class TrainSorterGUI:
                    command=self.controller.abort_autonomous
                    ).pack(side="left", padx=4)
 
-        self._monitor_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(auto_row, text="👁 Live Track Monitor",
-                        variable=self._monitor_var,
-                        command=self._toggle_monitor).pack(side="right", padx=4)
+        ttk.Label(auto_row, text="👁 Live Track Monitor: ON",
+                  foreground=ACCENT_GREEN,
+                  font=("Helvetica", 10, "bold")).pack(side="right", padx=4)
 
         # ── Track Status ──────────────────────────────────────────────────────
         f4 = ttk.LabelFrame(self.root, text="🚉  Track Status", padding=10)
@@ -256,16 +258,22 @@ class TrainSorterGUI:
         ttk.Label(speed_row, text="Speed:",
                   font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 8))
         self._speed_var = tk.IntVar(value=0)
-        self._speed_label_var = tk.StringVar(value="0%  (~0.0V)")
-        speed_scale = ttk.Scale(
-            speed_row, from_=0, to=100, orient="horizontal",
-            variable=self._speed_var, command=self._on_speed_change,
-        )
-        speed_scale.pack(side="left", fill="x", expand=True, padx=8)
-        tk.Label(speed_row, textvariable=self._speed_label_var, width=14,
+        self._speed_label_var = tk.StringVar(value="OFF  (0V)")
+
+        ttk.Button(speed_row, text="🐢  SLOW (40%)",
+                   command=lambda: self._set_preset_speed(40)
+                   ).pack(side="left", padx=4)
+        ttk.Button(speed_row, text="🐇  FAST (80%)", style="Go.TButton",
+                   command=lambda: self._set_preset_speed(80)
+                   ).pack(side="left", padx=4)
+        ttk.Button(speed_row, text="⏹  OFF", style="Stop.TButton",
+                   command=lambda: self._set_preset_speed(0)
+                   ).pack(side="left", padx=4)
+
+        tk.Label(speed_row, textvariable=self._speed_label_var, width=18,
                  bg=BG_CARD, fg=ACCENT_GOLD,
                  font=("Helvetica", 11, "bold"),
-                 padx=10, pady=4).pack(side="left", padx=4)
+                 padx=10, pady=4).pack(side="right", padx=4)
 
         # ── RFID Test ─────────────────────────────────────────────────────────
         f6 = ttk.LabelFrame(self.root, text="📡  RFID Test", padding=10)
@@ -442,13 +450,15 @@ class TrainSorterGUI:
             self._pause_btn.configure(text="■ PAUSE")
             self.run_bg(lambda d=saved_dir: self.controller.track.set_direction(d))
 
-    def _on_speed_change(self, _val):
-        pct = int(float(_val))
-        # Estimate output voltage: duty * (Vin - L298 dropout)
+    def _set_preset_speed(self, pct: int):
         max_duty = train_config.TRACK_MAX_DUTY / 100.0
         duty = pct / 100.0 * max_duty
         est_v = duty * (train_config.TRACK_INPUT_VOLTS - 2.0)
-        self._speed_label_var.set(f"{pct}%  (~{est_v:.1f}V)")
+        if pct == 0:
+            self._speed_label_var.set("OFF  (0V)")
+        else:
+            self._speed_label_var.set(f"{pct}%  (~{est_v:.1f}V)")
+        self._speed_var.set(pct)
         self.run_bg(lambda p=pct: self.controller.track.set_speed(p))
 
     def _start_autonomous(self):
@@ -458,12 +468,6 @@ class TrainSorterGUI:
             self.log("[AUTO] invalid pickup order — use comma-separated track numbers")
             return
         self.controller.start_autonomous(order)
-
-    def _toggle_monitor(self):
-        if self._monitor_var.get():
-            self.controller.start_track_monitor()
-        else:
-            self.controller.stop_track_monitor()
 
     def _toggle_mock(self):
         train_config.MOCK_MODE = self._mock_var.get()
