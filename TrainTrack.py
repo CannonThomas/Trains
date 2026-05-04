@@ -76,39 +76,33 @@ class TrainTrack:
             self.logger(f"[TRACK] invalid direction: {direction}")
             return
 
-        prev_speed = self.speed_pct
-        prev_dir   = self.direction
+        prev_dir = self.direction
         self.direction = direction
 
         if self.mock_mode:
             self.logger(f"[MOCK TRACK] dir={direction}")
             return
 
-        # Cut PWM briefly so the L298 sees a clean transition.
-        # Keep PWM channel alive at 0% — DON'T gpio_write the ENA pin.
-        self._set_duty(0)
-        lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 0)
-        lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 0)
-        time.sleep(0.05)  # dead-time so motor back-EMF settles
-
+        # Just flip IN1/IN2 — leave PWM alone. The L298 handles direction
+        # change while ENA is still PWMing; brief shoot-through is harmless
+        # at our duty/freq.
         if direction == "FWD":
             lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 1)
             lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 0)
-            self.logger(f"[TRACK] FWD  IN1=1 IN2=0  speed={prev_speed}% (was {prev_dir})")
+            self.logger(f"[TRACK] FWD  IN1=1 IN2=0  (was {prev_dir}, speed={self.speed_pct}%)")
         elif direction == "REV":
             lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 0)
             lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 1)
-            self.logger(f"[TRACK] REV  IN1=0 IN2=1  speed={prev_speed}% (was {prev_dir})")
+            self.logger(f"[TRACK] REV  IN1=0 IN2=1  (was {prev_dir}, speed={self.speed_pct}%)")
         else:  # STOP
-            self.logger(f"[TRACK] STOP IN1=0 IN2=0  (speed kept at {prev_speed}%)")
+            lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 0)
+            lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 0)
+            self._set_duty(0)
+            self.logger(f"[TRACK] STOP IN1=0 IN2=0 (speed kept at {self.speed_pct}%)")
             return
 
-        # Re-apply previous speed under new direction.
-        # If user pressed FWD/REV from a stopped state with 0 speed, kick to 50%.
-        if prev_speed == 0:
-            prev_speed = 50
-            self.logger("[TRACK] starting from 0 — kicking to 50%")
-        self.set_speed(prev_speed)
+        # Re-apply current speed in the new direction
+        self.set_speed(self.speed_pct)
 
     def stop(self):
         # Stop PWM and direction, but PRESERVE saved speed so REV/FWD resumes.
