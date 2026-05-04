@@ -22,14 +22,14 @@ BORDER_LINE  = "#576574"
 
 CAR_COLORS = {
     "Santa Fe": "#b71c1c",   # deep Santa Fe warbonnet red
-    "Yellow":   "#f1c40f",   # bright yellow
+    "Lackawanna": "#455a64",  # slate gray (DL&W diesel livery)
     "Triangle": "#e67e22",   # orange
 }
 
 # Unicode glyph for each car so it's recognisable beyond color alone
 CAR_ICONS = {
     "Santa Fe": "✦",   # star — Santa Fe nose emblem vibe
-    "Yellow":   "●",   # filled circle
+    "Lackawanna": "◆",   # diamond — DL&W herald shape
     "Triangle": "▲",   # literal triangle
 }
 
