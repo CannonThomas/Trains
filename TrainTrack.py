@@ -1,4 +1,5 @@
 # TrainTrack.py — L298 H-bridge track power (PWM speed + direction)
+import time
 import train_config
 
 try:
@@ -72,25 +73,37 @@ class TrainTrack:
         if direction not in ("FWD", "REV", "STOP"):
             self.logger(f"[TRACK] invalid direction: {direction}")
             return
+
+        prev_speed = self.speed_pct
+        prev_dir   = self.direction
         self.direction = direction
 
         if self.mock_mode:
             self.logger(f"[MOCK TRACK] dir={direction}")
             return
 
+        # Always cut PWM and zero direction pins before flipping polarity.
+        # Prevents shoot-through and ensures the L298 sees a clean transition.
+        self._stop_pwm()
+        lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 0)
+        lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 0)
+        time.sleep(0.05)  # brief dead-time so motor back-EMF settles
+
         if direction == "FWD":
             lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 1)
             lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 0)
+            self.logger(f"[TRACK] FWD  IN1=1 IN2=0  (was {prev_dir})")
         elif direction == "REV":
             lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 0)
             lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 1)
+            self.logger(f"[TRACK] REV  IN1=0 IN2=1  (was {prev_dir})")
         else:  # STOP
-            lgpio.gpio_write(self.chip, train_config.TRACK_IN1_PIN, 0)
-            lgpio.gpio_write(self.chip, train_config.TRACK_IN2_PIN, 0)
-            self._stop_pwm()
+            self.speed_pct = 0
+            self.logger(f"[TRACK] STOP IN1=0 IN2=0")
+            return
 
-        # Re-apply current speed under new direction
-        self.set_speed(self.speed_pct)
+        # Re-apply previous speed under new direction
+        self.set_speed(prev_speed)
 
     def stop(self):
         self.set_direction("STOP")
