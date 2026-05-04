@@ -166,6 +166,28 @@ class TrainSorterGUI:
         ttk.Button(sort_btns, text="↺  Reset All", style="Stop.TButton",
                    command=self._reset).pack(side="right", padx=4)
 
+        # ── Autonomous ────────────────────────────────────────────────────────
+        f_auto = ttk.LabelFrame(self.root, text="🤖  Autonomous Run", padding=10)
+        f_auto.pack(fill="x", **pad)
+
+        auto_row = ttk.Frame(f_auto)
+        auto_row.pack(fill="x")
+        ttk.Label(auto_row, text="Pickup order (e.g. 1,2,3):",
+                  font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 6))
+        self._pickup_order_var = tk.StringVar(value="1,2,3")
+        ttk.Entry(auto_row, textvariable=self._pickup_order_var,
+                  width=10).pack(side="left", padx=4)
+        ttk.Button(auto_row, text="▶  Start Autonomous", style="Go.TButton",
+                   command=self._start_autonomous).pack(side="left", padx=8)
+        ttk.Button(auto_row, text="■  Abort", style="Stop.TButton",
+                   command=self.controller.abort_autonomous
+                   ).pack(side="left", padx=4)
+
+        self._monitor_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(auto_row, text="👁 Live Track Monitor",
+                        variable=self._monitor_var,
+                        command=self._toggle_monitor).pack(side="right", padx=4)
+
         # ── Track Status ──────────────────────────────────────────────────────
         f4 = ttk.LabelFrame(self.root, text="🚉  Track Status", padding=10)
         f4.pack(fill="x", **pad)
@@ -428,6 +450,20 @@ class TrainSorterGUI:
         est_v = duty * (train_config.TRACK_INPUT_VOLTS - 2.0)
         self._speed_label_var.set(f"{pct}%  (~{est_v:.1f}V)")
         self.run_bg(lambda p=pct: self.controller.track.set_speed(p))
+
+    def _start_autonomous(self):
+        try:
+            order = [int(x.strip()) for x in self._pickup_order_var.get().split(",") if x.strip()]
+        except ValueError:
+            self.log("[AUTO] invalid pickup order — use comma-separated track numbers")
+            return
+        self.controller.start_autonomous(order)
+
+    def _toggle_monitor(self):
+        if self._monitor_var.get():
+            self.controller.start_track_monitor()
+        else:
+            self.controller.stop_track_monitor()
 
     def _toggle_mock(self):
         train_config.MOCK_MODE = self._mock_var.get()

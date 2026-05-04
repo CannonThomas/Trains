@@ -39,6 +39,16 @@ class TrainController:
         self._scan_thread = None
         self._sort_thread = None
 
+        # Live track monitor — polls track-end readers in the background
+        self._monitor_running = False
+        self._monitor_thread = None
+        self._monitor_pause = False  # set True during sort/scan/autonomous
+
+        # Autonomous routine state
+        self._auto_running = False
+        self._auto_thread = None
+        self._auto_abort = False
+
     def log(self, msg):
         self.logger(msg)
 
@@ -238,6 +248,239 @@ class TrainController:
                 if self.on_drop_confirmed:
                     self.on_drop_confirmed(None, track)
 
+    # ── Live Track Monitor ────────────────────────────────────────────────────
+
+    def start_track_monitor(self):
+        if self._monitor_running:
+            return
+        self._monitor_running = True
+        self._monitor_thread = threading.Thread(
+            target=self._track_monitor_loop, daemon=True)
+        self._monitor_thread.start()
+        self.log("[MON] Live track monitor started")
+
+    def stop_track_monitor(self):
+        self._monitor_running = False
+        self.log("[MON] Live track monitor stopped")
+
+    def _track_monitor_loop(self):
+        # Track which car each track currently shows so we only fire callbacks on change
+        last_state = {1: "<init>", 2: "<init>", 3: "<init>"}
+        while self._monitor_running:
+            if (self._monitor_pause or self._scanning or
+                    self._waiting_for_confirm or self._auto_running):
+                time.sleep(0.5)
+                continue
+            for track in (1, 2, 3):
+                if not self._monitor_running:
+                    break
+                reader_idx = train_config.TRACK_READER_IDX[track]
+                uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.20)
+                car = self.rfid.identify_car(uid) if uid else None
+                if car != last_state[track]:
+                    last_state[track] = car
+                    self.track_contents[track] = car
+                    if self.on_drop_confirmed:
+                        self.on_drop_confirmed(car, track)
+                time.sleep(0.05)
+            time.sleep(0.4)
+
+    # ── Autonomous routine ────────────────────────────────────────────────────
+
+    def start_autonomous(self, pickup_order):
+        """Run the full autonomous pickup→sort cycle.
+        pickup_order: list of track numbers in the order to pick up cars."""
+        if self._auto_running:
+            self.log("[AUTO] already running")
+            return
+        valid = [t for t in pickup_order if t in (1, 2, 3)]
+        if not valid:
+            self.log("[AUTO] no valid pickup tracks")
+            return
+        self._auto_abort = False
+        self._auto_running = True
+        self._auto_thread = threading.Thread(
+            target=self._autonomous_loop, args=(valid,), daemon=True)
+        self._auto_thread.start()
+
+    def abort_autonomous(self):
+        self._auto_abort = True
+        self.log("[AUTO] abort requested")
+
+    # ── Autonomous helpers ────────────────────────────────────────────────────
+
+    def _drive_until_rfid(self, reader_idx, direction, speed, timeout=30.0,
+                          expected_car=None):
+        """Drive in given direction at speed until reader detects a tag.
+        If expected_car set, wait for that specific car. Returns True if hit."""
+        self.track.set_direction(direction)
+        self.track.set_speed(speed)
+        deadline = time.time() + timeout
+        while time.time() < deadline and not self._auto_abort:
+            uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.15)
+            if uid:
+                car = self.rfid.identify_car(uid)
+                if expected_car is None or car == expected_car:
+                    return True
+            time.sleep(0.05)
+        return False
+
+    def _wait_track_state(self, track, want_car, timeout=30.0):
+        """Wait until track-end RFID matches want_car (None = empty)."""
+        reader_idx = train_config.TRACK_READER_IDX[track]
+        deadline = time.time() + timeout
+        while time.time() < deadline and not self._auto_abort:
+            uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.20)
+            car = self.rfid.identify_car(uid) if uid else None
+            self.track_contents[track] = car
+            if self.on_drop_confirmed:
+                self.on_drop_confirmed(car, track)
+            if car == want_car:
+                return True
+            time.sleep(0.10)
+        return False
+
+    def _autonomous_loop(self, pickup_order):
+        try:
+            self._set_status("AUTO: starting pickup phase")
+            self.io.set_all_straight()
+            time.sleep(0.5)
+
+            picked_up = []  # cars picked up, in pickup order (front of train = first)
+
+            # ── Phase 1: PICKUP ───────────────────────────────────────────
+            for track in pickup_order:
+                if self._auto_abort:
+                    break
+                car_at_track = self.track_contents.get(track)
+                self._set_status(f"AUTO: picking up Track {track}"
+                                 + (f" ({car_at_track})" if car_at_track else ""))
+
+                # 1. Drive FWD until entry RFID hit
+                self.log(f"[AUTO] driving FWD to entry reader")
+                self._drive_until_rfid(train_config.ENTRY_READER_IDX,
+                                       "FWD", speed=50, timeout=30)
+                self.track.stop()
+                time.sleep(0.5)
+
+                if self._auto_abort:
+                    break
+
+                # 2. Set switches for the target track
+                self.io.route_to_track(track)
+                time.sleep(0.5)
+
+                # 3. Reverse to back into the siding
+                self.log(f"[AUTO] reversing into Track {track}")
+                self._set_status(f"AUTO: reversing into Track {track}")
+                # Wait for the track-end RFID to go empty (car coupled and moved)
+                self.track.set_direction("REV")
+                self.track.set_speed(50)
+                ok = self._wait_track_state(track, want_car=None, timeout=30)
+                if not ok and not self._auto_abort:
+                    self.log(f"[AUTO] WARN: didn't see Track {track} go empty")
+
+                # 4. Continue reverse briefly so car clears the switch zone
+                time.sleep(2.5)
+                self.track.stop()
+                time.sleep(0.5)
+
+                if car_at_track:
+                    picked_up.append(car_at_track)
+
+                # 5. All switches straight before continuing
+                self.io.set_all_straight()
+                time.sleep(0.5)
+
+            if self._auto_abort:
+                self.track.stop()
+                self._set_status("AUTO: aborted")
+                return
+
+            # ── Phase 2: SAVE consist via entry RFID scan ─────────────────
+            # Drive forward through entry; the cars in tow will be detected
+            # in front→back order, which is reverse of pickup order
+            self._set_status("AUTO: scanning consist past entry reader")
+            self.car_order = []
+            seen = set()
+            self.track.set_direction("FWD")
+            self.track.set_speed(50)
+            scan_deadline = time.time() + 25
+            while time.time() < scan_deadline and not self._auto_abort:
+                uid = self.rfid.scan_reader(
+                    train_config.ENTRY_READER_IDX, timeout_sec=0.20)
+                if uid:
+                    car = self.rfid.identify_car(uid)
+                    if car and car not in seen:
+                        seen.add(car)
+                        self.car_order.append(car)
+                        self.log(f"[AUTO] scanned consist position "
+                                 f"{len(self.car_order)}: {car}")
+                        if self.on_car_scanned:
+                            self.on_car_scanned(car)
+                        if len(seen) >= len(picked_up):
+                            time.sleep(0.5)
+                            break
+                time.sleep(0.05)
+            self.track.stop()
+            time.sleep(0.5)
+
+            # ── Phase 3: SORT each car to its destination ────────────────
+            while self.car_order and not self._auto_abort:
+                car = self.car_order[-1]  # back of train drops first
+                track = self.car_destinations.get(car)
+                if not track:
+                    self.log(f"[AUTO] no destination for {car}, skipping")
+                    self.car_order.pop()
+                    continue
+
+                self._set_status(f"AUTO: dropping {car} at Track {track}")
+                self.io.route_to_track(track)
+                time.sleep(0.5)
+
+                # Reverse until that track-end RFID sees this car
+                self.track.set_direction("REV")
+                self.track.set_speed(50)
+                ok = self._wait_track_state(track, want_car=car, timeout=30)
+                # Continue back briefly to ensure car is past decoupler
+                time.sleep(2.0)
+                self.track.stop()
+                time.sleep(0.5)
+
+                self.io.set_all_straight()
+                time.sleep(0.5)
+
+                # Forward to entry, ready for next drop
+                if self.car_order and len(self.car_order) > 1:
+                    self._drive_until_rfid(train_config.ENTRY_READER_IDX,
+                                           "FWD", speed=50, timeout=30)
+                    self.track.stop()
+                    time.sleep(0.5)
+
+                if car in self.car_order:
+                    self.car_order.remove(car)
+                if self.on_drop_confirmed:
+                    self.on_drop_confirmed(car, track)
+
+            # ── Phase 4: Final return to loop ────────────────────────────
+            if not self._auto_abort:
+                self._set_status("AUTO: returning to loop")
+                self._drive_until_rfid(train_config.ENTRY_READER_IDX,
+                                       "FWD", speed=50, timeout=30)
+                self.track.stop()
+                self._set_status("AUTO: complete — all cars sorted")
+
+        except Exception as e:
+            self.log(f"[AUTO] error: {e}")
+            self._set_status(f"AUTO: error — {e}")
+        finally:
+            try:
+                self.track.stop()
+            except Exception:
+                pass
+            self._auto_running = False
+            self._auto_abort = False
+
     def show_state(self):
         self.log(f"[STATE] Consist:        {self.car_order}")
         self.log(f"[STATE] Track contents: {self.track_contents}")
@@ -245,6 +488,8 @@ class TrainController:
 
     def shutdown(self):
         self._scanning = False
+        self._monitor_running = False
+        self._auto_abort = True
         self._manual_confirm_event.set()
         try:
             self.track.cleanup()
