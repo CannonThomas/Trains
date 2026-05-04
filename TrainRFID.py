@@ -71,6 +71,7 @@ class _MFRC522:
     ModeReg       = 0x11
     TxControlReg  = 0x14
     TxASKReg      = 0x15
+    RFCfgReg      = 0x26   # antenna receiver gain
     TModeReg      = 0x2A
     TPrescalerReg = 0x2B
     TReloadRegH   = 0x2C
@@ -105,8 +106,11 @@ class _MFRC522:
         self._write(reg, self._read(reg) & (~mask & 0xFF))
 
     def init(self):
-        lgpio.gpio_write(self.chip, self.rst, 1)
+        # Hard reset the chip via RST pin first
+        lgpio.gpio_write(self.chip, self.rst, 0)
         time.sleep(0.05)
+        lgpio.gpio_write(self.chip, self.rst, 1)
+        time.sleep(0.10)
         self._write(self.CommandReg,    self.PCD_RESETPHASE)
         time.sleep(0.05)
         self._write(self.TModeReg,      0x8D)
@@ -115,6 +119,14 @@ class _MFRC522:
         self._write(self.TReloadRegH,   0)
         self._write(self.TxASKReg,      0x40)
         self._write(self.ModeReg,       0x3D)
+        # Max antenna gain (48 dB) — helps weak/marginal modules and tags farther away
+        self._write(self.RFCfgReg,      0x70)
+        self._set_bits(self.TxControlReg, 0x03)
+
+    def antenna_off(self):
+        self._clear_bits(self.TxControlReg, 0x03)
+
+    def antenna_on(self):
         self._set_bits(self.TxControlReg, 0x03)
 
     def _to_card(self, command: int, send_data: list):
@@ -280,9 +292,20 @@ class TrainRFID:
         if not self._ensure_ready():
             return None
 
+        reader = self._readers[reader_idx]
+
+        # Antenna kick — some modules drift; cycle the antenna to wake them up
+        try:
+            reader.antenna_off()
+            time.sleep(0.005)
+            reader.antenna_on()
+            time.sleep(0.005)
+        except Exception:
+            pass
+
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
-            uid = self._readers[reader_idx].detect_tag()
+            uid = reader.detect_tag()
             if uid:
                 return uid
             time.sleep(0.02)
