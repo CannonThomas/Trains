@@ -40,11 +40,10 @@ class TrainTrack:
     # ── Speed (0..100%) ───────────────────────────────────────────────────────
 
     # ── Sign-magnitude PWM ──────────────────────────────────────────────────
-    # ENA tied HIGH permanently. Direction determined by which IN pin gets
-    # PWM and which is held LOW:
+    # ENA tied HIGH. Direction = which IN pin gets PWM, the other LOW.
     #   FWD: IN1=PWM, IN2=0
     #   REV: IN1=0,   IN2=PWM
-    #   STOP: ENA=0, IN1=0, IN2=0
+    #   STOP: ENA=0,  IN1=0, IN2=0
 
     def _pwm(self, pin: int, duty: float):
         if self.mock_mode:
@@ -66,15 +65,13 @@ class TrainTrack:
         except Exception:
             pass
 
-    def set_speed(self, pct: int):
-        pct = max(0, min(100, int(pct)))
-        self.speed_pct = pct
-        duty = pct * train_config.TRACK_MAX_DUTY / 100.0
-
+    def _apply(self):
+        """Apply current direction + speed to the L298 pins."""
         if self.mock_mode:
-            self.logger(f"[MOCK TRACK] speed={pct}% duty={duty:.1f}% dir={self.direction}")
+            self.logger(f"[MOCK TRACK] dir={self.direction} speed={self.speed_pct}%")
             return
 
+        duty = self.speed_pct * train_config.TRACK_MAX_DUTY / 100.0
         in1 = train_config.TRACK_IN1_PIN
         in2 = train_config.TRACK_IN2_PIN
 
@@ -91,6 +88,10 @@ class TrainTrack:
             self._pwm_off(in2)
             lgpio.gpio_write(self.chip, train_config.TRACK_ENA_PIN, 0)
 
+    def set_speed(self, pct: int):
+        self.speed_pct = max(0, min(100, int(pct)))
+        self._apply()
+
     def set_direction(self, direction: str):
         direction = direction.upper()
         if direction not in ("FWD", "REV", "STOP"):
@@ -99,11 +100,13 @@ class TrainTrack:
         prev = self.direction
         self.direction = direction
         self.logger(f"[TRACK] {prev} -> {direction} (speed={self.speed_pct}%)")
-        # set_speed handles all the pin/PWM work
-        self.set_speed(self.speed_pct)
+        self._apply()
 
     def stop(self):
-        self.set_direction("STOP")
+        # Cuts power but PRESERVES speed_pct so FWD/REV resumes at same speed.
+        self.direction = "STOP"
+        self.logger(f"[TRACK] STOP (speed kept at {self.speed_pct}%)")
+        self._apply()
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
