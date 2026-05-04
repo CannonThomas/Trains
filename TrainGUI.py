@@ -64,6 +64,15 @@ def _apply_theme(root):
         foreground=[("active", "white")])
     style.configure("Go.TButton", background=ACCENT_GREEN, foreground="white")
     style.map("Go.TButton", background=[("active", "#16a085")])
+    style.configure("ActiveSpeed.TButton",
+        background=ACCENT_GREEN, foreground="white",
+        bordercolor="white", relief="raised", borderwidth=3,
+        font=("Helvetica", 10, "bold"))
+    style.map("ActiveSpeed.TButton", background=[("active", "#16a085")])
+    style.configure("InactiveSpeed.TButton",
+        background=BG_CARD, foreground=FG_TEXT,
+        font=("Helvetica", 10, "bold"))
+    style.map("InactiveSpeed.TButton", background=[("active", ACCENT_BLUE)])
     style.configure("Stop.TButton", background=ACCENT_RED, foreground="white")
     style.map("Stop.TButton", background=[("active", "#c0392b")])
     style.configure("Warn.TButton", background=ACCENT_GOLD, foreground="white")
@@ -260,12 +269,14 @@ class TrainSorterGUI:
         self._speed_var = tk.IntVar(value=0)
         self._speed_label_var = tk.StringVar(value="OFF  (0V)")
 
-        ttk.Button(speed_row, text="🐢  SLOW (40%)",
-                   command=lambda: self._set_preset_speed(40)
-                   ).pack(side="left", padx=4)
-        ttk.Button(speed_row, text="🐇  FAST (80%)", style="Go.TButton",
-                   command=lambda: self._set_preset_speed(80)
-                   ).pack(side="left", padx=4)
+        self._slow_btn = ttk.Button(speed_row, text="🐢  SLOW (40%)",
+                                    style="InactiveSpeed.TButton",
+                                    command=lambda: self._set_preset_speed(40))
+        self._slow_btn.pack(side="left", padx=4)
+        self._fast_btn = ttk.Button(speed_row, text="🐇  FAST (80%)",
+                                    style="InactiveSpeed.TButton",
+                                    command=lambda: self._set_preset_speed(80))
+        self._fast_btn.pack(side="left", padx=4)
         ttk.Button(speed_row, text="⏹  OFF", style="Stop.TButton",
                    command=lambda: self._set_preset_speed(0)
                    ).pack(side="left", padx=4)
@@ -459,6 +470,13 @@ class TrainSorterGUI:
         else:
             self._speed_label_var.set(f"{pct}%  (~{est_v:.1f}V)")
         self._speed_var.set(pct)
+
+        # Highlight whichever speed button is active
+        self._slow_btn.configure(
+            style="ActiveSpeed.TButton" if pct == 40 else "InactiveSpeed.TButton")
+        self._fast_btn.configure(
+            style="ActiveSpeed.TButton" if pct == 80 else "InactiveSpeed.TButton")
+
         self.run_bg(lambda p=pct: self.controller.track.set_speed(p))
 
     def _start_autonomous(self):
