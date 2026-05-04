@@ -98,6 +98,17 @@ class TrainTrack:
             self.logger(f"[TRACK] invalid direction: {direction}")
             return
         prev = self.direction
+        if prev == direction:
+            return  # no-op, prevents redundant pulses
+
+        # Always pass through a STOP state with dead-time before changing
+        # direction. Prevents motor reversal glitches and L298 confusion.
+        if not self.mock_mode and prev != "STOP" and direction != "STOP":
+            self._pwm_off(train_config.TRACK_IN1_PIN)
+            self._pwm_off(train_config.TRACK_IN2_PIN)
+            lgpio.gpio_write(self.chip, train_config.TRACK_ENA_PIN, 0)
+            time.sleep(0.30)  # 300ms dead-time
+
         self.direction = direction
         self.logger(f"[TRACK] {prev} -> {direction} (speed={self.speed_pct}%)")
         self._apply()
