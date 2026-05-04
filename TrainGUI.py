@@ -120,8 +120,51 @@ class TrainSorterGUI:
 
     # ── Build UI ──────────────────────────────────────────────────────────────
 
+    def _build_scroll_container(self):
+        """Wrap the whole GUI in a scrollable canvas so it scrolls vertically."""
+        outer = tk.Frame(self.root, bg=BG_DARK)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, bg=BG_DARK, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        inner = tk.Frame(canvas, bg=BG_DARK)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        inner.bind("<Configure>", _on_inner_configure)
+
+        def _on_canvas_configure(e):
+            canvas.itemconfigure(window_id, width=e.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse-wheel scrolling (Linux uses Button-4/5; macOS/Windows use MouseWheel)
+        def _on_mousewheel(e):
+            if e.num == 4 or e.delta > 0:
+                canvas.yview_scroll(-3, "units")
+            elif e.num == 5 or e.delta < 0:
+                canvas.yview_scroll(3, "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", _on_mousewheel)
+        canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        return inner
+
     def _build_widgets(self):
+        # Build a scrollable container and route all section frames to it
+        # by aliasing self._parent. The original self.root stays as the Tk window.
+        content = self._build_scroll_container()
+        # Override self.root for the rest of this build only — restored at end
+        _orig_root = self.root
+        self.root = content
         pad = {"padx": 12, "pady": 6}
+        # Note: all the existing `self.root.pack(...)` calls below now pack into
+        # the scrollable frame. We restore the real root at the end of this method.
 
         # ── Title bar ─────────────────────────────────────────────────────────
         title_bar = tk.Frame(self.root, bg=BG_DARK)
@@ -334,6 +377,9 @@ class TrainSorterGUI:
         self.log_text.configure(yscrollcommand=sb.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+
+        # Restore real Tk root so root.after / protocol still work elsewhere
+        self.root = _orig_root
 
     # ── Dynamic panels ────────────────────────────────────────────────────────
 
