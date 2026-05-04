@@ -21,9 +21,16 @@ ACCENT_RED   = "#e74c3c"
 BORDER_LINE  = "#576574"
 
 CAR_COLORS = {
-    "Red":    "#e74c3c",
-    "Yellow": "#f1c40f",
-    "Orange": "#e67e22",
+    "Santa Fe": "#b71c1c",   # deep Santa Fe warbonnet red
+    "Yellow":   "#f1c40f",   # bright yellow
+    "Triangle": "#e67e22",   # orange
+}
+
+# Unicode glyph for each car so it's recognisable beyond color alone
+CAR_ICONS = {
+    "Santa Fe": "✦",   # star — Santa Fe nose emblem vibe
+    "Yellow":   "●",   # filled circle
+    "Triangle": "▲",   # literal triangle
 }
 
 
@@ -339,11 +346,12 @@ class TrainSorterGUI:
         else:
             for i, car in enumerate(self.controller.car_order):
                 color = CAR_COLORS.get(car, "#555555")
+                icon = CAR_ICONS.get(car, "■")
                 lbl = tk.Label(self._consist_frame,
-                               text=f"{i+1}. {car}",
+                               text=f"{i+1}. {icon} {car}",
                                bg=color, fg="white",
-                               relief="groove", padx=8, pady=4,
-                               font=("TkDefaultFont", 10, "bold"))
+                               relief="groove", padx=10, pady=6,
+                               font=("Helvetica", 11, "bold"))
                 lbl.pack(side="left", padx=3)
         self._update_next_car_label()
 
@@ -395,8 +403,9 @@ class TrainSorterGUI:
     def _on_drop_confirmed(self, car_name, track):
         def _update():
             if car_name:
+                icon = CAR_ICONS.get(car_name, "●")
                 self._track_vars_display[track].set(
-                    f"TRACK {track}\n\n● {car_name.upper()} ●\nFULL")
+                    f"TRACK {track}\n\n{icon}  {car_name.upper()}  {icon}\nFULL")
                 color = CAR_COLORS.get(car_name, "#27ae60")
                 self._track_labels[track].configure(
                     bg=color, fg="white",

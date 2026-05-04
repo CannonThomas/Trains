@@ -1,5 +1,5 @@
 {
-  "Red":    {"rfid": "72BC0310", "default_track": 1},
-  "Yellow": {"rfid": "424E1010", "default_track": 2},
-  "Orange": {"rfid": "F2BE0410", "default_track": 3}
+  "Santa Fe": {"rfid": "72BC0310", "default_track": 1},
+  "Yellow":   {"rfid": "424E1010", "default_track": 2},
+  "Triangle": {"rfid": "F2BE0410", "default_track": 3}
 }
