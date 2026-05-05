@@ -355,6 +355,24 @@ class TrainController:
             time.sleep(0.5)
 
             # ── Phase 1: PICKUP — loco starts in loop, reverses to grab cars ──
+            # Each pickup ends by driving FWD back to the entry RFID so the
+            # entry reader can confirm the just-picked-up car (proving it's
+            # coupled and being pulled) and re-anchor position for the next
+            # reverse move.
+            #
+            # The very first pickup also begins from the entry RFID — loco
+            # drives FWD until entry sees it, then stops at the loop start,
+            # then reverses with switches set.
+
+            # 0. Drive to entry RFID once at the start so we begin from a
+            #    known position regardless of where loco was placed.
+            self._set_status("AUTO ① Heading to entry RFID")
+            self._drive_until_rfid(train_config.ENTRY_READER_IDX,
+                                   "FWD", speed=SPEED, timeout=30)
+            time.sleep(0.8)
+            self.track.stop()
+            time.sleep(0.4)
+
             for i, track in enumerate(pickup_order):
                 if self._auto_abort:
                     break
@@ -382,16 +400,29 @@ class TrainController:
                 self.track.stop()
                 time.sleep(0.4)
 
-                # Mainline straight before next move
+                # Mainline straight, then run FWD to entry RFID. The entry
+                # reader confirms the just-picked-up car and serves as the
+                # start position for the next reverse pickup.
                 self.io.set_all_straight()
                 time.sleep(0.5)
 
-                # Between pickups: forward back to the loop area for next pass
-                if i < len(pickup_order) - 1 and not self._auto_abort:
-                    self._set_status("AUTO: returning to loop for next pickup")
-                    self._drive_until_rfid(train_config.ENTRY_READER_IDX,
-                                           "FWD", speed=SPEED, timeout=30)
-                    time.sleep(1.0)
+                if not self._auto_abort:
+                    self._set_status(
+                        f"AUTO ① Confirming {car_at_track or 'pickup'} "
+                        f"at entry RFID")
+                    confirm_target = car_at_track  # exact car if known
+                    confirmed = self._drive_until_rfid(
+                        train_config.ENTRY_READER_IDX, "FWD", speed=SPEED,
+                        timeout=30, expected_car=confirm_target)
+                    if confirmed:
+                        self.log(f"[AUTO] entry RFID confirmed pickup of "
+                                 f"{confirm_target or 'a car'}")
+                    else:
+                        self.log(f"[AUTO] WARN: entry RFID didn't confirm "
+                                 f"{confirm_target} within timeout")
+                    # Coast slightly past so loco is just past entry, ready
+                    # to reverse with switches set.
+                    time.sleep(0.8)
                     self.track.stop()
                     time.sleep(0.4)
 
@@ -403,15 +434,19 @@ class TrainController:
             empties = [t for t in pickup_order if not self.track_contents.get(t)]
             self.log(f"[AUTO] picked-up tracks now empty: {empties}")
 
-            # ── Phase 2: FORWARD past entry RFID — scan consist order ─────
-            self._set_status("AUTO ② Forward — scanning consist at entry RFID")
+            # ── Phase 2: Confirm full consist via entry RFID ───────────────
+            # The cars were each confirmed at entry during their pickup pass,
+            # but we re-scan one more time so car_order reflects the actual
+            # order they pass the entry reader (front→back of train).
+            self._set_status("AUTO ② Confirming full consist at entry RFID")
             self.car_order = []
             seen = set()
             target = len(pickup_order)
             self.track.set_direction("FWD")
             self.track.set_speed(SPEED)
             scan_deadline = time.time() + 30
-            while time.time() < scan_deadline and not self._auto_abort:
+            while (len(seen) < target and time.time() < scan_deadline
+                   and not self._auto_abort):
                 uid = self.rfid.scan_reader(
                     train_config.ENTRY_READER_IDX, timeout_sec=0.20)
                 if uid:
@@ -422,13 +457,11 @@ class TrainController:
                         self.log(f"[AUTO] consist {len(self.car_order)}: {car}")
                         if self.on_car_scanned:
                             self.on_car_scanned(car)
-                        # 3rd (last) car detected → reverse to start sorting
-                        if len(seen) >= target:
-                            time.sleep(1.5)  # let last car clear past entry
-                            break
                 time.sleep(0.05)
+            time.sleep(1.0)  # let last car clear past entry
             self.track.stop()
             time.sleep(0.5)
+            self.log(f"[AUTO] full consist (front→back): {self.car_order}")
 
             # ── Phase 3: SORT — reverse, drop each car at destination ─────
             while self.car_order and not self._auto_abort:
@@ -474,25 +507,22 @@ class TrainController:
                 self._set_status("AUTO: aborted")
                 return
 
-            # ── Phase 4: DONE — forward, hit entry RFID twice with all full ──
-            self._set_status("AUTO ④ Finish — looping past entry RFID")
-            all_full = lambda: all(self.track_contents.get(t) for t in (1, 2, 3))
+            # ── Phase 4: DONE — last drop confirmed, loco runs FWD to finish ──
+            all_full = all(self.track_contents.get(t) for t in (1, 2, 3))
+            self.log(f"[AUTO] all_full={all_full}, contents={self.track_contents}")
+            self._set_status("AUTO ④ Done — running forward in loop")
             self.track.set_direction("FWD")
             self.track.set_speed(SPEED)
-            hits = 0
-            deadline = time.time() + 60
-            while hits < 2 and time.time() < deadline and not self._auto_abort:
-                if self._drive_until_rfid(train_config.ENTRY_READER_IDX,
-                                          "FWD", speed=SPEED, timeout=30):
-                    hits += 1
-                    self.log(f"[AUTO] entry pass {hits}/2  all_full={all_full()}")
-                    time.sleep(1.5)  # let loco coast clear before next pass
+            # Drive forward until entry RFID hit once, then stop (loco parked in loop)
+            self._drive_until_rfid(train_config.ENTRY_READER_IDX,
+                                   "FWD", speed=SPEED, timeout=30)
+            time.sleep(1.0)
             self.track.stop()
-            if all_full() and hits >= 2:
-                self._set_status("AUTO ✓ Complete — all sorted, loco parked in loop")
+            if all_full:
+                self._set_status("AUTO ✓ Complete — all 3 cars sorted!")
             else:
-                self._set_status(f"AUTO finished — entry passes={hits}, "
-                                 f"all_full={all_full()}")
+                self._set_status(
+                    f"AUTO finished — track_contents={self.track_contents}")
 
         except Exception as e:
             self.log(f"[AUTO] error: {e}")
