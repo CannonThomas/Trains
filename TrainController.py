@@ -600,7 +600,7 @@ class TrainController:
         SPEED = FWD_SPEED  # legacy alias for FWD-only contexts
         LOCO  = train_config.LOCO_NAME
         # Per-track REV durations on pickup
-        PICKUP_REV_SEC = {1: 9.0, 2: 10.0, 3: 12.0}
+        PICKUP_REV_SEC = {1: 9.0, 2: 12.0, 3: 15.0}
 
         try:
             self.io.set_all_straight()
