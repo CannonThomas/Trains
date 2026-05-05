@@ -326,6 +326,7 @@ class TrainSorterGUI:
         self._speed_var = tk.IntVar(value=0)
         self._speed_label_var = tk.StringVar(value="OFF  (0V)")
 
+        # Preset buttons
         self._slow_btn = ttk.Button(speed_row, text="🐢  SLOW (40%)",
                                     style="InactiveSpeed.TButton",
                                     command=lambda: self._set_preset_speed(40))
@@ -338,10 +339,23 @@ class TrainSorterGUI:
                    command=lambda: self._set_preset_speed(0)
                    ).pack(side="left", padx=4)
 
+        # Live readout (gold)
         tk.Label(speed_row, textvariable=self._speed_label_var, width=18,
                  bg=BG_CARD, fg=ACCENT_GOLD,
                  font=("Helvetica", 11, "bold"),
                  padx=10, pady=4).pack(side="right", padx=4)
+
+        # Manual slider (0-100) to the right of the presets, before the readout
+        slider_row = ttk.Frame(f_track)
+        slider_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(slider_row, text="Manual:",
+                  font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 8))
+        self._speed_scale = ttk.Scale(
+            slider_row, from_=0, to=100, orient="horizontal",
+            variable=self._speed_var,
+            command=self._on_slider_change,
+        )
+        self._speed_scale.pack(side="left", fill="x", expand=True, padx=8)
 
         # ── RFID Test ─────────────────────────────────────────────────────────
         f6 = ttk.LabelFrame(self.root, text="📡  RFID Test", padding=10)
@@ -527,7 +541,7 @@ class TrainSorterGUI:
             self._pause_btn.configure(text="■ PAUSE")
             self.run_bg(lambda d=saved_dir: self.controller.track.set_direction(d))
 
-    def _set_preset_speed(self, pct: int):
+    def _update_speed_readout(self, pct: int):
         max_duty = train_config.TRACK_MAX_DUTY / 100.0
         duty = pct / 100.0 * max_duty
         est_v = duty * (train_config.TRACK_INPUT_VOLTS - 2.0)
@@ -535,14 +549,20 @@ class TrainSorterGUI:
             self._speed_label_var.set("OFF  (0V)")
         else:
             self._speed_label_var.set(f"{pct}%  (~{est_v:.1f}V)")
-        self._speed_var.set(pct)
-
-        # Highlight whichever speed button is active
+        # Highlight a preset button only if the active speed exactly matches
         self._slow_btn.configure(
             style="ActiveSpeed.TButton" if pct == 40 else "InactiveSpeed.TButton")
         self._fast_btn.configure(
             style="ActiveSpeed.TButton" if pct == 80 else "InactiveSpeed.TButton")
 
+    def _set_preset_speed(self, pct: int):
+        self._speed_var.set(pct)
+        self._update_speed_readout(pct)
+        self.run_bg(lambda p=pct: self.controller.track.set_speed(p))
+
+    def _on_slider_change(self, _val):
+        pct = int(float(_val))
+        self._update_speed_readout(pct)
         self.run_bg(lambda p=pct: self.controller.track.set_speed(p))
 
     def _start_autonomous(self):

@@ -348,6 +348,48 @@ class TrainController:
             time.sleep(0.10)
         return False
 
+    def _wait_track_state_with_rocking(self, track, want_car,
+                                       initial_dir="REV",
+                                       window_sec=8.0, max_rocks=6,
+                                       rev_speed=50, fwd_speed=40,
+                                       fwd_pulse_sec=1.5):
+        """Wait for track-end RFID to match want_car. If it doesn't show up
+        within a short window, rock the loco FWD then REV to help the coupler
+        seat. Repeats up to max_rocks times."""
+        reader_idx = train_config.TRACK_READER_IDX[track]
+        # Initial direction
+        self.track.set_direction(initial_dir)
+        self.track.set_speed(rev_speed if initial_dir == "REV" else fwd_speed)
+
+        rock_count = 0
+        while rock_count <= max_rocks and not self._auto_abort:
+            window_end = time.time() + window_sec
+            while time.time() < window_end and not self._auto_abort:
+                uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.20)
+                car = self.rfid.identify_car(uid) if uid else None
+                self.track_contents[track] = car
+                if self.on_drop_confirmed:
+                    self.on_drop_confirmed(car, track)
+                if car == want_car:
+                    return True
+                time.sleep(0.10)
+
+            # Window expired — try a rock
+            rock_count += 1
+            target_desc = "empty" if want_car is None else want_car
+            self.log(f"[AUTO] coupler retry {rock_count}/{max_rocks} "
+                     f"(want Track {track} = {target_desc}) — rocking")
+            # Pulse FWD briefly to seat coupler
+            self.track.set_direction("FWD")
+            self.track.set_speed(fwd_speed)
+            time.sleep(fwd_pulse_sec)
+            # Then back to REV harder
+            self.track.set_direction("REV")
+            self.track.set_speed(rev_speed)
+
+        self.log(f"[AUTO] giving up after {max_rocks} rocks on Track {track}")
+        return False
+
     def _autonomous_loop(self, pickup_order):
         SPEED = 50
         try:
@@ -386,14 +428,14 @@ class TrainController:
                 self.io.route_to_track(track)
                 time.sleep(0.6)
 
-                # Reverse into the siding to couple the car
-                self.log(f"[AUTO] reversing into Track {track}")
-                self.track.set_direction("REV")
-                self.track.set_speed(SPEED)
-                # Wait until that track-end RFID goes EMPTY (car coupled & pulled)
-                ok = self._wait_track_state(track, want_car=None, timeout=30)
+                # Reverse into the siding to couple the car. Use rocking
+                # retry so a finicky coupler can be re-seated automatically.
+                self.log(f"[AUTO] reversing into Track {track} (with rocking)")
+                ok = self._wait_track_state_with_rocking(
+                    track, want_car=None, initial_dir="REV",
+                    window_sec=8.0, max_rocks=6, rev_speed=SPEED)
                 if not ok and not self._auto_abort:
-                    self.log(f"[AUTO] WARN: Track {track} didn't go empty")
+                    self.log(f"[AUTO] WARN: Track {track} pickup failed")
 
                 # Continue reverse briefly so the car fully clears the switch zone
                 time.sleep(2.5)
@@ -476,10 +518,11 @@ class TrainController:
                 self.io.route_to_track(dest)
                 time.sleep(0.6)
 
-                self.track.set_direction("REV")
-                self.track.set_speed(SPEED)
-                # Wait for that track-end RFID to confirm THIS car is parked
-                self._wait_track_state(dest, want_car=car, timeout=30)
+                # Reverse into the siding with rocking retry so a stubborn
+                # decouple/park can be re-attempted automatically.
+                self._wait_track_state_with_rocking(
+                    dest, want_car=car, initial_dir="REV",
+                    window_sec=8.0, max_rocks=6, rev_speed=SPEED)
                 # Continue reverse briefly for clean decouple
                 time.sleep(2.0)
                 self.track.stop()
