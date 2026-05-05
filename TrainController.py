@@ -456,97 +456,94 @@ class TrainController:
     RFID_DEBOUNCE_COUNT = 4
 
     def _pickup_from_track(self, track, rev_seconds=6.0,
-                           rev_speed=50, fwd_speed=50):
-        """Pickup logic:
-        1. REV for rev_seconds (push into siding to couple)
-        2. STOP, then FWD while polling track-end RFID
-        3. If RFID goes empty (debounced) → stay FWD, exit (caller drives to entry)
-        4. If RFID still has car after FWD_TRY_SEC → stop, REV again
-        5. Repeat until empty seen, up to MAX_ATTEMPTS
-        """
-        REV_SEC       = rev_seconds
-        FWD_TRY_SEC   = 5.0    # how long to try pulling car out before retrying
-        STOP_BETWEEN  = 0.7
-        MAX_ATTEMPTS  = 8
-        DEBOUNCE      = self.RFID_DEBOUNCE_COUNT
-        reader_idx    = train_config.TRACK_READER_IDX[track]
+                           rev_speed=40, fwd_speed=60):
+        """Pickup logic — drives all the way to entry RFID and verifies the
+        pickup there (no track-end RFID polling needed):
 
-        def hard_stop_with_pause():
+        1. Bulletproof STOP → REV transition (long dead-time so direction
+           can never be wrong even at 60% PWM)
+        2. REV for rev_seconds (push into siding to couple)
+        3. Bulletproof STOP → FWD transition
+        4. FWD until entry RFID detects loco AND the expected car
+        5. If both seen → SUCCESS
+        6. If only loco seen (no car) → loco didn't pick up the car;
+           switches still set, REV again for another attempt
+        """
+        LOCO         = train_config.LOCO_NAME
+        expected_car = self.track_contents.get(track)
+        REV_SEC      = rev_seconds
+        DRIVE_TO_ENTRY_TIMEOUT = 45.0
+        MAX_ATTEMPTS = 6
+
+        # Direction-change buffer — guarantees no wrong-direction glitch.
+        # All pickup REV/FWD transitions go through this sequence.
+        def safe_set_direction(direction, speed):
             self.track.stop()
-            t_end = time.time() + STOP_BETWEEN
-            while time.time() < t_end and not self._auto_abort:
-                time.sleep(0.05)
+            time.sleep(0.5)              # let any motion bleed off
+            self.track.set_direction(direction)  # internal 300ms dead-time
+            self.track.set_speed(speed)
+            time.sleep(0.2)              # PWM settle
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if self._auto_abort:
                 self.track.stop()
                 return False
 
-            # ── Step 1: REV for the allotted seconds ──
-            self.log(f"[AUTO] === Track {track} pickup attempt {attempt}"
-                     f"/{MAX_ATTEMPTS} → REV for {REV_SEC}s ===")
-            # Clean STOP first to ensure REV starts from a known direction state
-            self.track.stop()
-            time.sleep(0.3)
-            self.track.set_direction("REV")
-            self.track.set_speed(rev_speed)
+            # ── 1. REV for allotted time ──────────────────────────────────
+            self.log(f"[AUTO] === Track {track} pickup attempt "
+                     f"{attempt}/{MAX_ATTEMPTS} → REV {REV_SEC}s "
+                     f"@ {rev_speed}% ===")
+            safe_set_direction("REV", rev_speed)
             t_end = time.time() + REV_SEC
             while time.time() < t_end and not self._auto_abort:
                 time.sleep(0.05)
-            # Full STOP + dead-time before flipping direction
-            hard_stop_with_pause()
 
             if self._auto_abort:
+                self.track.stop()
                 return False
 
-            # ── Step 2: FWD while polling RFID ──
-            # Force a clean STOP→FWD transition every time. Even though
-            # hard_stop_with_pause already did a stop, we add an explicit
-            # extra dead-time here to be 100% sure REV momentum is gone
-            # before FWD PWM kicks in.
-            self.log(f"[AUTO] Track {track} attempt {attempt} → FWD, "
-                     f"watching RFID for empty (max {FWD_TRY_SEC}s)")
-            self.track.stop()
-            time.sleep(0.4)
-            self.track.set_direction("FWD")
-            self.track.set_speed(fwd_speed)
-            time.sleep(0.1)  # let PWM settle before motor sees voltage in earnest
-            t_end = time.time() + FWD_TRY_SEC
-            empty_streak = 0
-            while time.time() < t_end and not self._auto_abort:
-                uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.15)
-                car = self.rfid.identify_car(uid) if uid else None
-                self.track_contents[track] = car
-                if self.on_drop_confirmed:
-                    self.on_drop_confirmed(car, track)
-                if car is None:
-                    empty_streak += 1
-                    if empty_streak >= DEBOUNCE:
-                        # RFID empty confirmed. Force a clean STOP →
-                        # restart-FWD transition so the next phase starts
-                        # with completely fresh direction state.
-                        self.log(f"[AUTO] Track {track} empty confirmed on "
-                                 f"attempt {attempt} — restarting FWD clean")
-                        self.track.stop()
-                        time.sleep(0.4)
-                        self.track.set_direction("FWD")
-                        self.track.set_speed(fwd_speed)
-                        time.sleep(0.1)
-                        return True
-                else:
-                    empty_streak = 0
+            # ── 2. FWD until entry RFID detects loco + expected car ──────
+            self.log(f"[AUTO] Track {track} attempt {attempt} → FWD "
+                     f"@ {fwd_speed}% to entry RFID")
+            safe_set_direction("FWD", fwd_speed)
+
+            seen = set()
+            deadline = time.time() + DRIVE_TO_ENTRY_TIMEOUT
+            while time.time() < deadline and not self._auto_abort:
+                uid = self.rfid.scan_reader(
+                    train_config.ENTRY_READER_IDX, timeout_sec=0.15)
+                if uid:
+                    name = self.rfid.identify_car(uid)
+                    if name and name not in seen:
+                        seen.add(name)
+                        self.log(f"[AUTO]   entry detected: {name} "
+                                 f"(seen so far: {seen})")
+                # Pickup confirmed if loco AND expected car both seen
+                # (or no expected car set, just loco)
+                loco_ok = LOCO in seen
+                car_ok  = (expected_car in seen) if expected_car else True
+                if loco_ok and car_ok:
+                    time.sleep(1.0)  # let consist clear past entry
+                    self.track.stop()
+                    time.sleep(0.4)
+                    self.log(f"[AUTO] Track {track} pickup CONFIRMED at "
+                             f"entry: {seen}")
+                    return True
                 time.sleep(0.05)
 
-            # FWD didn't extract — go back and try again
-            self.log(f"[AUTO] Track {track} attempt {attempt}: car still "
-                     f"present, retrying REV/FWD")
-            hard_stop_with_pause()
+            # FWD timed out without seeing expected_car at entry → didn't pick up
+            self.track.stop()
+            time.sleep(0.5)
+            if expected_car and expected_car not in seen:
+                self.log(f"[AUTO] Track {track} attempt {attempt}: "
+                         f"{expected_car} not seen at entry "
+                         f"(saw: {seen}) — retrying REV")
+            else:
+                self.log(f"[AUTO] Track {track} attempt {attempt}: "
+                         f"entry timeout (saw: {seen}) — retrying REV")
 
-        self.log(f"[AUTO] Track {track}: all {MAX_ATTEMPTS} attempts failed — "
-                 f"continuing FWD to entry RFID anyway")
-        # Force FWD so caller's drive-to-entry runs cleanly
-        self.track.set_direction("FWD")
-        self.track.set_speed(fwd_speed)
+        self.log(f"[AUTO] Track {track}: all {MAX_ATTEMPTS} attempts failed")
+        self.track.stop()
         return False
 
     def _drop_to_track(self, track, expected_car, rev_speed=50, fwd_speed=40):
@@ -647,42 +644,21 @@ class TrainController:
                 self.io.route_to_track(track)
                 time.sleep(0.6)
 
-                # REV/FWD rocking with per-track REV duration. _pickup_from_track
-                # exits the moment the track-end RFID confirms empty — and leaves
-                # the loco running FWD so the next step can continue smoothly.
-                self._pickup_from_track(track, rev_seconds=rev_sec,
-                                        rev_speed=REV_SPEED, fwd_speed=FWD_SPEED)
+                # _pickup_from_track now drives all the way to entry RFID
+                # and verifies the pickup by reading tags there. If the
+                # expected car isn't detected at entry, it goes back and
+                # retries automatically.
+                ok = self._pickup_from_track(track, rev_seconds=rev_sec,
+                                             rev_speed=REV_SPEED,
+                                             fwd_speed=FWD_SPEED)
                 if self._auto_abort:
                     break
-                if car_at_track and car_at_track not in picked_up_cars:
+                if ok and car_at_track and car_at_track not in picked_up_cars:
                     picked_up_cars.append(car_at_track)
 
-                # Mainline straight first
+                # Mainline straight after each pickup
                 self.io.set_all_straight()
                 time.sleep(0.5)
-
-                # Force a clean STOP → FWD transition. This ensures the next
-                # FWD movement starts with full dead-time + clean PWM apply,
-                # eliminating any chance of carryover direction state.
-                self.track.stop()
-                time.sleep(0.4)
-
-                expected = [LOCO] + picked_up_cars
-                self._set_status(
-                    f"AUTO ① Confirming at entry: {', '.join(expected)}")
-                self.log(f"[AUTO] FWD past entry, waiting for: {expected}")
-                # Explicit FWD start with full direction-change sequence
-                self.track.set_direction("FWD")
-                self.track.set_speed(FWD_SPEED)
-                time.sleep(0.2)
-                seen = self._drive_fwd_until_tags_seen(expected, speed=FWD_SPEED,
-                                                      timeout=60)
-                missing = [t for t in expected if t not in seen]
-                if missing:
-                    self.log(f"[AUTO] WARN: entry pass missing tags: {missing}")
-                else:
-                    self.log(f"[AUTO] entry confirmed loco + {len(picked_up_cars)} car(s)")
-                # _drive_fwd_until_tags_seen already stopped the loco
 
             if self._auto_abort:
                 self.track.stop()
