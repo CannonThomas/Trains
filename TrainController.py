@@ -546,30 +546,40 @@ class TrainController:
         self.track.stop()
         return False
 
-    def _drop_to_track(self, track, expected_car, rev_speed=50, fwd_speed=40):
+    def _drop_to_track(self, track, expected_car, rev_speed=40, fwd_speed=60):
         """Push `expected_car` (the car at the back of the train) onto the
         stopper at the end of `track`, decouple, then FWD away leaving the
-        car on the RFID.
-
-        Returns True if track-end RFID continues to show expected_car after
-        the loco has pulled forward (= decouple worked).
+        car on the RFID. RFID is polled continuously throughout — every
+        read is reflected in track_contents and fired through the
+        on_drop_confirmed callback so the GUI tile updates live.
         """
         reader_idx = train_config.TRACK_READER_IDX[track]
 
-        # 1. REV slowly until track-end RFID detects the car (= car at stopper)
-        # Debounced: require N consecutive matching reads before accepting.
-        self.log(f"[AUTO] drop: REV pushing car into Track {track} stopper")
+        def poll_once():
+            """Single RFID read with live GUI update. Returns car name or None."""
+            uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.15)
+            car = self.rfid.identify_car(uid) if uid else None
+            if car and self.rfid.is_loco(car):
+                car = None  # loco shouldn't count as a car at a track-end
+            self.track_contents[track] = car
+            if self.on_drop_confirmed:
+                self.on_drop_confirmed(car, track)
+            return car
+
+        # ── Bulletproof STOP → REV transition ─────────────────────────────
+        self.track.stop()
+        time.sleep(0.5)
         self.track.set_direction("REV")
         self.track.set_speed(rev_speed)
+        time.sleep(0.2)
+
+        # ── 1. REV with continuous RFID polling, debounced match ──────────
+        self.log(f"[AUTO] drop: REV pushing {expected_car} into Track {track} stopper")
         deadline = time.time() + self.DROP_REV_TIMEOUT
         arrived = False
         match_streak = 0
         while time.time() < deadline and not self._auto_abort:
-            uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.20)
-            car = self.rfid.identify_car(uid) if uid else None
-            self.track_contents[track] = car
-            if self.on_drop_confirmed:
-                self.on_drop_confirmed(car, track)
+            car = poll_once()
             if car == expected_car:
                 match_streak += 1
                 if match_streak >= self.RFID_DEBOUNCE_COUNT:
@@ -577,29 +587,52 @@ class TrainController:
                     break
             else:
                 match_streak = 0
-            time.sleep(0.10)
+            time.sleep(0.05)
         self.track.stop()
         if not arrived:
             self.log(f"[AUTO] drop: timed out waiting for {expected_car} at "
-                     f"Track {track}")
+                     f"Track {track} (saw: {self.track_contents.get(track)})")
 
-        # 2. Pause briefly while sitting on stopper to let magnetic decoupler engage
-        time.sleep(self.DROP_DECOUPLE_PAUSE)
+        # ── 2. Decouple pause — keep polling so GUI stays live ────────────
+        self.log(f"[AUTO] drop: pausing on stopper for decoupler")
+        t_end = time.time() + self.DROP_DECOUPLE_PAUSE
+        while time.time() < t_end and not self._auto_abort:
+            poll_once()
+            time.sleep(0.10)
 
-        # 3. FWD to pull loco away — car should stay on the RFID
-        self.log(f"[AUTO] drop: FWD to release loco from {expected_car}")
+        # ── Bulletproof STOP → FWD transition ─────────────────────────────
+        self.track.stop()
+        time.sleep(0.5)
         self.track.set_direction("FWD")
         self.track.set_speed(fwd_speed)
-        time.sleep(self.DROP_FWD_VERIFY_SEC)
+        time.sleep(0.2)
 
-        # 4. Verify the car is still on the RFID (decouple succeeded)
-        uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.30)
-        car_still = self.rfid.identify_car(uid) if uid else None
-        if car_still == expected_car:
-            self.log(f"[AUTO] drop OK — {expected_car} parked on Track {track}")
+        # ── 3. FWD pull-away — keep polling. We expect the car to stay on
+        #      the RFID (decouple succeeded). If RFID drops to None during
+        #      the pull-away, it failed — log and continue.
+        self.log(f"[AUTO] drop: FWD to release loco from {expected_car}")
+        t_end = time.time() + self.DROP_FWD_VERIFY_SEC
+        last_car = None
+        while time.time() < t_end and not self._auto_abort:
+            last_car = poll_once()
+            time.sleep(0.10)
+
+        # ── 4. Final verification ─────────────────────────────────────────
+        # Take a few extra reads to be confident (debounced final state)
+        match_streak = 0
+        for _ in range(self.RFID_DEBOUNCE_COUNT):
+            if self._auto_abort:
+                break
+            c = poll_once()
+            if c == expected_car:
+                match_streak += 1
+            time.sleep(0.10)
+
+        if match_streak >= self.RFID_DEBOUNCE_COUNT:
+            self.log(f"[AUTO] drop ✓ {expected_car} parked on Track {track}")
             return True
-        self.log(f"[AUTO] drop WARN — track {track} reads {car_still} "
-                 f"(expected {expected_car})")
+        self.log(f"[AUTO] drop WARN — Track {track} not stable as {expected_car}; "
+                 f"current={self.track_contents.get(track)}")
         return False
 
     def _autonomous_loop(self, pickup_order):
