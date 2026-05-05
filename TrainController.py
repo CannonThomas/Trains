@@ -482,24 +482,35 @@ class TrainController:
                 self.track.stop()
                 return False
 
-            # ── Step 1: REV for 6s ──
+            # ── Step 1: REV for the allotted seconds ──
             self.log(f"[AUTO] === Track {track} pickup attempt {attempt}"
                      f"/{MAX_ATTEMPTS} → REV for {REV_SEC}s ===")
+            # Clean STOP first to ensure REV starts from a known direction state
+            self.track.stop()
+            time.sleep(0.3)
             self.track.set_direction("REV")
             self.track.set_speed(rev_speed)
             t_end = time.time() + REV_SEC
             while time.time() < t_end and not self._auto_abort:
                 time.sleep(0.05)
+            # Full STOP + dead-time before flipping direction
             hard_stop_with_pause()
 
             if self._auto_abort:
                 return False
 
             # ── Step 2: FWD while polling RFID ──
+            # Force a clean STOP→FWD transition every time. Even though
+            # hard_stop_with_pause already did a stop, we add an explicit
+            # extra dead-time here to be 100% sure REV momentum is gone
+            # before FWD PWM kicks in.
             self.log(f"[AUTO] Track {track} attempt {attempt} → FWD, "
                      f"watching RFID for empty (max {FWD_TRY_SEC}s)")
+            self.track.stop()
+            time.sleep(0.4)
             self.track.set_direction("FWD")
             self.track.set_speed(fwd_speed)
+            time.sleep(0.1)  # let PWM settle before motor sees voltage in earnest
             t_end = time.time() + FWD_TRY_SEC
             empty_streak = 0
             while time.time() < t_end and not self._auto_abort:
@@ -686,32 +697,25 @@ class TrainController:
                 if self.on_car_scanned:
                     self.on_car_scanned(c)
 
-            # ── 2.5. PICKUP VICTORY LAP — loop around with all 3 cars ─────
-            # After all 3 picked up, do one full lap of the layout. The lap
-            # ends only when entry RFID re-confirms LOCO + all 3 cars passing,
-            # proving the whole consist is still coupled before drops begin.
+            # ── 2.5. PICKUP VICTORY LAP — fixed 25s FWD then transition ──
+            # All 3 + loco were already confirmed at entry during pickups.
+            # Just run FWD for 25 seconds (lap around the layout), then
+            # cleanly transition to REV to start the drop-off phase.
             if not self._auto_abort:
-                self._set_status("AUTO 🏁 Pickup victory lap (all 3 cars in tow)")
-                self.log("[AUTO] starting pickup victory lap")
-                # Coast a bit so we're well past entry before scanning re-arrival
+                self._set_status("AUTO 🏁 Pickup victory lap — 25s FWD")
+                self.log("[AUTO] starting 25s timed pickup victory lap")
+                # Clean STOP → FWD transition
+                self.track.stop()
+                time.sleep(0.4)
                 self.track.set_direction("FWD")
                 self.track.set_speed(FWD_SPEED)
-                time.sleep(2.5)
-
-                # Wait for the WHOLE consist (loco + every picked-up car) to
-                # pass entry RFID again on the lap.
-                expected_lap = [LOCO] + list(picked_up_cars)
-                self.log(f"[AUTO] victory lap — waiting for: {expected_lap}")
-                seen = self._drive_fwd_until_tags_seen(
-                    expected_lap, speed=FWD_SPEED, timeout=120)
-                missing = [t for t in expected_lap if t not in seen]
-                if missing:
-                    self.log(f"[AUTO] WARN: victory lap missing: {missing}")
-                else:
-                    self.log("[AUTO] pickup victory lap ✓ — all "
-                             f"{len(expected_lap)} tags re-confirmed")
-                # _drive_fwd_until_tags_seen already stopped the loco
+                t_end = time.time() + 25.0
+                while time.time() < t_end and not self._auto_abort:
+                    time.sleep(0.1)
+                # Clean STOP before flipping to REV for drops
+                self.track.stop()
                 time.sleep(0.5)
+                self.log("[AUTO] victory lap complete — transitioning to drops")
 
             # ── 3. SORT each car to its destination ───────────────────────
             while self.car_order and not self._auto_abort:
