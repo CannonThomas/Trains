@@ -424,50 +424,90 @@ class TrainController:
     # Prevents flaky/sensitive RFIDs from causing false positives.
     RFID_DEBOUNCE_COUNT = 4
 
-    def _pickup_from_track(self, track, rev_speed=50, fwd_speed=40):
+    def _pickup_from_track(self, track, rev_speed=50, fwd_speed=50):
         """Couple to a stationary car at the end of `track` by rocking the
-        loco REV/FWD a fixed number of times. After all rocks complete, the
-        caller drives FWD to the entry RFID to confirm the pickup.
+        loco REV/FWD up to MAX_ROCKS times.
 
-        We don't try to detect the empty state here — the RFID at the stopper
-        is too unreliable mid-rock. Verification happens at the entry RFID
-        on the way back to the loop.
+        During each FWD phase we poll the track-end RFID. If it goes empty
+        (debounced) we KEEP the loco moving FWD — that confirms the car was
+        pulled away from the stopper. Then the caller drives the rest of
+        the way to the entry RFID without an extra direction change.
+
+        REV phases just run for the full timer (no early-exit), since on
+        the way IN there's nothing useful to detect.
         """
-        REV_PHASE_SEC = 3.0
-        FWD_PHASE_SEC = 1.5
+        REV_PHASE_SEC = 4.0
+        FWD_PHASE_SEC = 3.0
+        STOP_BETWEEN  = 0.7
         MAX_ROCKS     = 6
+        DEBOUNCE      = self.RFID_DEBOUNCE_COUNT
+        reader_idx    = train_config.TRACK_READER_IDX[track]
+
+        def run_rev(duration):
+            """Set REV, run for `duration`, then stop with dead-time."""
+            if self._auto_abort:
+                return
+            self.log(f"[AUTO] pickup → REV for {duration}s @ {rev_speed}%")
+            self.track.set_direction("REV")
+            self.track.set_speed(rev_speed)
+            t_end = time.time() + duration
+            while time.time() < t_end and not self._auto_abort:
+                time.sleep(0.05)
+            self.track.stop()
+            t_end = time.time() + STOP_BETWEEN
+            while time.time() < t_end and not self._auto_abort:
+                time.sleep(0.05)
+
+        def run_fwd_watch(duration):
+            """Set FWD, run for `duration`, polling track-end RFID. Returns
+            True if RFID confirmed empty (car extracted) — leaves loco
+            running FWD so the caller can continue to entry RFID."""
+            if self._auto_abort:
+                return False
+            self.log(f"[AUTO] pickup → FWD for {duration}s @ {fwd_speed}% "
+                     f"(watching Track {track} RFID)")
+            self.track.set_direction("FWD")
+            self.track.set_speed(fwd_speed)
+            t_end = time.time() + duration
+            empty_streak = 0
+            while time.time() < t_end and not self._auto_abort:
+                uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.15)
+                car = self.rfid.identify_car(uid) if uid else None
+                self.track_contents[track] = car
+                if self.on_drop_confirmed:
+                    self.on_drop_confirmed(car, track)
+                if car is None:
+                    empty_streak += 1
+                    if empty_streak >= DEBOUNCE:
+                        # Car confirmed pulled away — keep going FWD
+                        self.log(f"[AUTO] Track {track} RFID empty (debounced)"
+                                 f" — pickup confirmed, staying FWD")
+                        return True
+                else:
+                    empty_streak = 0
+                time.sleep(0.05)
+            # Time out — full stop + dead-time before next REV
+            self.track.stop()
+            t_end = time.time() + STOP_BETWEEN
+            while time.time() < t_end and not self._auto_abort:
+                time.sleep(0.05)
+            return False
 
         for rock in range(1, MAX_ROCKS + 1):
             if self._auto_abort:
                 self.track.stop()
                 return False
+            self.log(f"[AUTO] === Track {track} rock {rock}/{MAX_ROCKS} ===")
+            run_rev(REV_PHASE_SEC)
+            if run_fwd_watch(FWD_PHASE_SEC):
+                # Car gone — loco still running FWD, exit early
+                return True
 
-            # REV phase — push into siding, contact car
-            self.log(f"[AUTO] pickup rock {rock}/{MAX_ROCKS} → REV "
-                     f"({REV_PHASE_SEC}s)")
-            self.track.set_direction("REV")
-            self.track.set_speed(rev_speed)
-            t_end = time.time() + REV_PHASE_SEC
-            while time.time() < t_end and not self._auto_abort:
-                time.sleep(0.05)
-
-            if self._auto_abort:
-                self.track.stop()
-                return False
-
-            # FWD phase — try to seat coupler / pull car
-            self.log(f"[AUTO] pickup rock {rock}/{MAX_ROCKS} → FWD "
-                     f"({FWD_PHASE_SEC}s)")
-            self.track.set_direction("FWD")
-            self.track.set_speed(fwd_speed)
-            t_end = time.time() + FWD_PHASE_SEC
-            while time.time() < t_end and not self._auto_abort:
-                time.sleep(0.05)
-
-        # All rocks done — leave loco moving FWD so caller's "drive to entry"
-        # picks up smoothly without an extra direction change.
         self.log(f"[AUTO] {MAX_ROCKS} rocks complete on Track {track}; "
                  f"continuing FWD to confirm at entry RFID")
+        # Make sure loco is moving FWD for the entry-RFID confirmation step
+        self.track.set_direction("FWD")
+        self.track.set_speed(fwd_speed)
         return True
 
     def _drop_to_track(self, track, expected_car, rev_speed=50, fwd_speed=40):
