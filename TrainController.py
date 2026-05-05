@@ -270,31 +270,32 @@ class TrainController:
         self.log("[MON] Live track monitor stopped")
 
     def _track_monitor_loop(self):
-        # Track which car each track currently shows so we only fire callbacks on change
+        # Always-on monitor. The shared SPI bus is now protected by a lock
+        # inside TrainRFID, so this can run continuously without colliding
+        # with sort/scan/auto operations.
         last_state = {1: "<init>", 2: "<init>", 3: "<init>"}
         while self._monitor_running:
             try:
-                if (self._monitor_pause or self._scanning or
-                        self._waiting_for_confirm or self._auto_running):
-                    time.sleep(0.3)
-                    continue
                 for track in (1, 2, 3):
                     if not self._monitor_running:
                         break
                     reader_idx = train_config.TRACK_READER_IDX[track]
                     try:
-                        uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.20)
+                        uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.15)
                     except Exception as e:
                         self.log(f"[MON] reader {track} err: {e}")
                         uid = None
                     car = self.rfid.identify_car(uid) if uid else None
+                    # Loco shouldn't appear at a track-end reader; ignore if it does
+                    if car and self.rfid.is_loco(car):
+                        car = None
                     if car != last_state[track]:
                         last_state[track] = car
                         self.track_contents[track] = car
                         if self.on_drop_confirmed:
                             self.on_drop_confirmed(car, track)
                     time.sleep(0.05)
-                time.sleep(0.3)
+                time.sleep(0.2)
             except Exception as e:
                 self.log(f"[MON] loop err: {e}")
                 time.sleep(1.0)

@@ -5,6 +5,7 @@
 #
 # Python requirements:  pip install lgpio
 
+import threading
 import time
 from collections import deque
 import train_config
@@ -209,6 +210,9 @@ class TrainRFID:
         self._spi: _SoftSPI = None
         self._chip = None
         self._ready = False
+        # Bus lock — only ONE thread may transfer on the shared software SPI
+        # at a time. Every public method that hits the bus must acquire this.
+        self._bus_lock = threading.Lock()
 
     def _is_mock(self) -> bool:
         return train_config.MOCK_MODE or not _LGPIO_OK
@@ -273,7 +277,8 @@ class TrainRFID:
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
             for i, reader in enumerate(self._readers):
-                uid = reader.detect_tag()
+                with self._bus_lock:
+                    uid = reader.detect_tag()
                 if uid:
                     self.logger(f"[RFID] {train_config.RFID_READERS[i]['name']}: {uid}")
                     return (i, uid)
@@ -296,16 +301,18 @@ class TrainRFID:
 
         # Antenna kick — some modules drift; cycle the antenna to wake them up
         try:
-            reader.antenna_off()
-            time.sleep(0.005)
-            reader.antenna_on()
-            time.sleep(0.005)
+            with self._bus_lock:
+                reader.antenna_off()
+                time.sleep(0.005)
+                reader.antenna_on()
+                time.sleep(0.005)
         except Exception:
             pass
 
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
-            uid = reader.detect_tag()
+            with self._bus_lock:
+                uid = reader.detect_tag()
             if uid:
                 return uid
             time.sleep(0.02)
@@ -319,7 +326,8 @@ class TrainRFID:
         for i, reader in enumerate(self._readers):
             name = train_config.RFID_READERS[i]["name"]
             try:
-                v = reader.read_version()
+                with self._bus_lock:
+                    v = reader.read_version()
                 if v in (0x91, 0x92):
                     status = "OK (genuine MFRC522)"
                 elif v == 0x88:
