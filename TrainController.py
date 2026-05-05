@@ -270,10 +270,14 @@ class TrainController:
         self.log("[MON] Live track monitor stopped")
 
     def _track_monitor_loop(self):
-        # Always-on monitor. The shared SPI bus is now protected by a lock
-        # inside TrainRFID, so this can run continuously without colliding
-        # with sort/scan/auto operations.
-        last_state = {1: "<init>", 2: "<init>", 3: "<init>"}
+        # Always-on monitor with state debouncing — flaky/sensitive readers
+        # can't fire callbacks until the same reading has been confirmed
+        # MONITOR_DEBOUNCE times in a row.
+        MONITOR_DEBOUNCE = 3
+        committed = {1: "<init>", 2: "<init>", 3: "<init>"}  # last GUI-fired state
+        pending   = {1: None, 2: None, 3: None}              # candidate new state
+        streak    = {1: 0, 2: 0, 3: 0}
+
         while self._monitor_running:
             try:
                 for track in (1, 2, 3):
@@ -286,14 +290,23 @@ class TrainController:
                         self.log(f"[MON] reader {track} err: {e}")
                         uid = None
                     car = self.rfid.identify_car(uid) if uid else None
-                    # Loco shouldn't appear at a track-end reader; ignore if it does
                     if car and self.rfid.is_loco(car):
                         car = None
-                    if car != last_state[track]:
-                        last_state[track] = car
-                        self.track_contents[track] = car
+
+                    # Debounce: only commit if the same reading repeats N times
+                    if car == pending[track]:
+                        streak[track] += 1
+                    else:
+                        pending[track] = car
+                        streak[track] = 1
+
+                    if (streak[track] >= MONITOR_DEBOUNCE
+                            and pending[track] != committed[track]):
+                        committed[track] = pending[track]
+                        self.track_contents[track] = pending[track]
                         if self.on_drop_confirmed:
-                            self.on_drop_confirmed(car, track)
+                            self.on_drop_confirmed(pending[track], track)
+
                     time.sleep(0.05)
                 time.sleep(0.2)
             except Exception as e:
@@ -407,6 +420,10 @@ class TrainController:
     DROP_DECOUPLE_PAUSE = 1.0  # sit on stopper to let magnet decoupler engage
     DROP_FWD_VERIFY_SEC = 2.0  # FWD this long, then verify RFID still shows car
 
+    # Debounce — number of consecutive reads required to confirm a state change.
+    # Prevents flaky/sensitive RFIDs from causing false positives.
+    RFID_DEBOUNCE_COUNT = 4
+
     def _pickup_from_track(self, track, rev_speed=50, fwd_speed=40):
         """Couple to a stationary car at the end of `track` and pull it out.
 
@@ -415,29 +432,35 @@ class TrainController:
         then must go FORWARD to pull car out and off the RFID.
 
         Strategy: rock REV ↔ FWD up to 6 times. Each phase polls the track-end
-        RFID continuously. As soon as the car is pulled away from the RFID
-        (i.e. RFID goes empty), we stop and return success — this prevents
-        the next REV phase from shoving the freshly-pulled car back into the
-        stopper.
-
-        Returns True if track-end RFID went empty.
+        RFID continuously. RFID reads are DEBOUNCED — we require several
+        consecutive empty reads before accepting "car gone" so a flaky reader
+        can't cause a false positive.
         """
         reader_idx = train_config.TRACK_READER_IDX[track]
-        REV_PHASE_SEC = 4.0   # how long to back into siding each rock
-        FWD_PHASE_SEC = 2.5   # how long to try pulling forward each rock
+        REV_PHASE_SEC = 4.0
+        FWD_PHASE_SEC = 2.5
         MAX_ROCKS     = 6
+        DEBOUNCE      = self.RFID_DEBOUNCE_COUNT
 
         def poll_for_empty(duration):
-            """Poll RFID for `duration` seconds. Return True if it goes empty."""
+            """Poll for `duration` sec. Returns True after DEBOUNCE consecutive
+            empty reads — guards against transient RFID dropouts."""
             end = time.time() + duration
+            empty_streak = 0
             while time.time() < end and not self._auto_abort:
                 uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.15)
                 car = self.rfid.identify_car(uid) if uid else None
+                # Update GUI live (use raw single-read state for visual feedback)
                 self.track_contents[track] = car
                 if self.on_drop_confirmed:
                     self.on_drop_confirmed(car, track)
+                # Debounced "empty" decision
                 if car is None:
-                    return True
+                    empty_streak += 1
+                    if empty_streak >= DEBOUNCE:
+                        return True
+                else:
+                    empty_streak = 0
                 time.sleep(0.05)
             return False
 
@@ -445,24 +468,22 @@ class TrainController:
             if self._auto_abort:
                 return False
 
-            # ── REV phase: back into siding to reach/contact the car ──
+            # REV phase
             self.log(f"[AUTO] pickup rock {rock}/{MAX_ROCKS} → REV into Track {track}")
             self.track.set_direction("REV")
             self.track.set_speed(rev_speed)
-            # If somehow the car is already gone during REV, accept and stop
             if poll_for_empty(REV_PHASE_SEC):
                 self.track.stop()
-                self.log(f"[AUTO] pickup OK during REV phase {rock}")
+                self.log(f"[AUTO] pickup OK during REV phase {rock} (debounced)")
                 return True
 
-            # ── FWD phase: try to pull the car out ──
+            # FWD phase
             self.log(f"[AUTO] pickup rock {rock}/{MAX_ROCKS} → FWD to extract")
             self.track.set_direction("FWD")
             self.track.set_speed(fwd_speed)
             if poll_for_empty(FWD_PHASE_SEC):
-                # Car was pulled away — stop now so REV doesn't shove it back
                 self.track.stop()
-                self.log(f"[AUTO] pickup OK during FWD phase {rock}")
+                self.log(f"[AUTO] pickup OK during FWD phase {rock} (debounced)")
                 return True
 
         self.log(f"[AUTO] all {MAX_ROCKS} rocks failed on Track {track}")
@@ -480,11 +501,13 @@ class TrainController:
         reader_idx = train_config.TRACK_READER_IDX[track]
 
         # 1. REV slowly until track-end RFID detects the car (= car at stopper)
+        # Debounced: require N consecutive matching reads before accepting.
         self.log(f"[AUTO] drop: REV pushing car into Track {track} stopper")
         self.track.set_direction("REV")
         self.track.set_speed(rev_speed)
         deadline = time.time() + self.DROP_REV_TIMEOUT
         arrived = False
+        match_streak = 0
         while time.time() < deadline and not self._auto_abort:
             uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.20)
             car = self.rfid.identify_car(uid) if uid else None
@@ -492,8 +515,12 @@ class TrainController:
             if self.on_drop_confirmed:
                 self.on_drop_confirmed(car, track)
             if car == expected_car:
-                arrived = True
-                break
+                match_streak += 1
+                if match_streak >= self.RFID_DEBOUNCE_COUNT:
+                    arrived = True
+                    break
+            else:
+                match_streak = 0
             time.sleep(0.10)
         self.track.stop()
         if not arrived:
@@ -535,14 +562,21 @@ class TrainController:
             # drives FWD until entry sees it, then stops at the loop start,
             # then reverses with switches set.
 
-            # 0. Drive to entry RFID once at the start so we begin from a
-            #    known position regardless of where loco was placed.
-            self._set_status("AUTO ① Heading to entry RFID")
-            self._drive_until_rfid(train_config.ENTRY_READER_IDX,
-                                   "FWD", speed=SPEED, timeout=30)
+            # 0. ALWAYS start the routine by driving FWD until the entry RFID
+            #    detects something (loco's own tag or a car). This anchors the
+            #    loco at a known position before the first reverse.
+            self._set_status("AUTO ① Driving FWD to entry RFID before first pickup")
+            self.log("[AUTO] starting FWD until entry RFID detection")
+            found = self._drive_until_rfid(train_config.ENTRY_READER_IDX,
+                                           "FWD", speed=SPEED, timeout=30)
+            if found:
+                self.log("[AUTO] entry RFID hit — loco at loop start")
+            else:
+                self.log("[AUTO] WARN: entry RFID never triggered; "
+                         "starting pickup anyway")
             time.sleep(0.8)
             self.track.stop()
-            time.sleep(0.4)
+            time.sleep(0.5)
 
             for i, track in enumerate(pickup_order):
                 if self._auto_abort:
