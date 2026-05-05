@@ -297,6 +297,11 @@ class TrainRFID:
         if not self._ensure_ready():
             return None
 
+        # Bounds-check so a bad index never crashes the monitor loop
+        if reader_idx < 0 or reader_idx >= len(self._readers):
+            self.logger(f"[RFID] bad reader_idx {reader_idx}")
+            return None
+
         reader = self._readers[reader_idx]
 
         # Antenna kick — some modules drift; cycle the antenna to wake them up
