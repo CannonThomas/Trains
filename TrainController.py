@@ -511,9 +511,16 @@ class TrainController:
                 if car is None:
                     empty_streak += 1
                     if empty_streak >= DEBOUNCE:
-                        # RFID empty confirmed → keep going FWD, return success
+                        # RFID empty confirmed. Force a clean STOP →
+                        # restart-FWD transition so the next phase starts
+                        # with completely fresh direction state.
                         self.log(f"[AUTO] Track {track} empty confirmed on "
-                                 f"attempt {attempt} — staying FWD")
+                                 f"attempt {attempt} — restarting FWD clean")
+                        self.track.stop()
+                        time.sleep(0.4)
+                        self.track.set_direction("FWD")
+                        self.track.set_speed(fwd_speed)
+                        time.sleep(0.1)
                         return True
                 else:
                     empty_streak = 0
@@ -639,17 +646,25 @@ class TrainController:
                 if car_at_track and car_at_track not in picked_up_cars:
                     picked_up_cars.append(car_at_track)
 
-                # Mainline straight, then drive FWD past entry RFID. Wait for
-                # the entry reader to detect the loco AND every picked-up car
-                # before stopping → confirms full consist coupled.
+                # Mainline straight first
                 self.io.set_all_straight()
                 time.sleep(0.5)
+
+                # Force a clean STOP → FWD transition. This ensures the next
+                # FWD movement starts with full dead-time + clean PWM apply,
+                # eliminating any chance of carryover direction state.
+                self.track.stop()
+                time.sleep(0.4)
 
                 expected = [LOCO] + picked_up_cars
                 self._set_status(
                     f"AUTO ① Confirming at entry: {', '.join(expected)}")
                 self.log(f"[AUTO] FWD past entry, waiting for: {expected}")
-                seen = self._drive_fwd_until_tags_seen(expected, speed=SPEED,
+                # Explicit FWD start with full direction-change sequence
+                self.track.set_direction("FWD")
+                self.track.set_speed(FWD_SPEED)
+                time.sleep(0.2)
+                seen = self._drive_fwd_until_tags_seen(expected, speed=FWD_SPEED,
                                                       timeout=60)
                 missing = [t for t in expected if t not in seen]
                 if missing:
