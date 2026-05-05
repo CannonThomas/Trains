@@ -397,6 +397,118 @@ class TrainController:
         self.log(f"[AUTO] giving up after {max_rocks} rocks on Track {track}")
         return False
 
+    # ── Pickup / Drop helpers (siding has a stopper at the far end) ───────
+
+    # Tunables
+    PICKUP_REV_SECONDS = 4.0   # how long to REV into siding to reach the car
+    PICKUP_FWD_TIMEOUT = 8.0   # max time to wait for car to leave RFID after FWD
+    PICKUP_MAX_RETRIES = 4
+    DROP_REV_TIMEOUT   = 25.0  # max time to wait for car to reach stopper RFID
+    DROP_DECOUPLE_PAUSE = 1.0  # sit on stopper to let magnet decoupler engage
+    DROP_FWD_VERIFY_SEC = 2.0  # FWD this long, then verify RFID still shows car
+
+    def _pickup_from_track(self, track, rev_speed=50, fwd_speed=40):
+        """Couple to a stationary car at the end of `track` and pull it out.
+
+        Physics: car sits on stopper at the far end of the siding (also where
+        the track-end RFID is). Loco enters siding by reversing, contacts car,
+        then must go FORWARD to pull car out and off the RFID.
+
+        Returns True if track-end RFID went empty (car successfully extracted).
+        """
+        reader_idx = train_config.TRACK_READER_IDX[track]
+
+        for attempt in range(1, self.PICKUP_MAX_RETRIES + 1):
+            if self._auto_abort:
+                return False
+
+            # 1. REV into siding to reach the car (timed — can't stall on stopper)
+            self.log(f"[AUTO] pickup attempt {attempt}: REV into Track {track}")
+            self.track.set_direction("REV")
+            self.track.set_speed(rev_speed)
+            t_end = time.time() + self.PICKUP_REV_SECONDS
+            while time.time() < t_end and not self._auto_abort:
+                time.sleep(0.05)
+            self.track.stop()
+            time.sleep(0.4)
+            if self._auto_abort:
+                return False
+
+            # 2. FWD to pull the car out — watch for RFID empty as proof of pickup
+            self.log(f"[AUTO] pickup attempt {attempt}: FWD to extract car")
+            self.track.set_direction("FWD")
+            self.track.set_speed(fwd_speed)
+            deadline = time.time() + self.PICKUP_FWD_TIMEOUT
+            while time.time() < deadline and not self._auto_abort:
+                uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.20)
+                car = self.rfid.identify_car(uid) if uid else None
+                self.track_contents[track] = car
+                if self.on_drop_confirmed:
+                    self.on_drop_confirmed(car, track)
+                if car is None:
+                    # Track-end RFID went empty → car was pulled away
+                    self.log(f"[AUTO] pickup OK on attempt {attempt}")
+                    return True
+                time.sleep(0.10)
+
+            # FWD didn't extract — coupler probably didn't engage
+            self.track.stop()
+            time.sleep(0.4)
+            self.log(f"[AUTO] pickup attempt {attempt} failed — retrying")
+
+        self.log(f"[AUTO] all pickup attempts failed on Track {track}")
+        return False
+
+    def _drop_to_track(self, track, expected_car, rev_speed=50, fwd_speed=40):
+        """Push `expected_car` (the car at the back of the train) onto the
+        stopper at the end of `track`, decouple, then FWD away leaving the
+        car on the RFID.
+
+        Returns True if track-end RFID continues to show expected_car after
+        the loco has pulled forward (= decouple worked).
+        """
+        reader_idx = train_config.TRACK_READER_IDX[track]
+
+        # 1. REV slowly until track-end RFID detects the car (= car at stopper)
+        self.log(f"[AUTO] drop: REV pushing car into Track {track} stopper")
+        self.track.set_direction("REV")
+        self.track.set_speed(rev_speed)
+        deadline = time.time() + self.DROP_REV_TIMEOUT
+        arrived = False
+        while time.time() < deadline and not self._auto_abort:
+            uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.20)
+            car = self.rfid.identify_car(uid) if uid else None
+            self.track_contents[track] = car
+            if self.on_drop_confirmed:
+                self.on_drop_confirmed(car, track)
+            if car == expected_car:
+                arrived = True
+                break
+            time.sleep(0.10)
+        self.track.stop()
+        if not arrived:
+            self.log(f"[AUTO] drop: timed out waiting for {expected_car} at "
+                     f"Track {track}")
+
+        # 2. Pause briefly while sitting on stopper to let magnetic decoupler engage
+        time.sleep(self.DROP_DECOUPLE_PAUSE)
+
+        # 3. FWD to pull loco away — car should stay on the RFID
+        self.log(f"[AUTO] drop: FWD to release loco from {expected_car}")
+        self.track.set_direction("FWD")
+        self.track.set_speed(fwd_speed)
+        time.sleep(self.DROP_FWD_VERIFY_SEC)
+
+        # 4. Verify the car is still on the RFID (decouple succeeded)
+        uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.30)
+        car_still = self.rfid.identify_car(uid) if uid else None
+        if car_still == expected_car:
+            self.log(f"[AUTO] drop OK — {expected_car} parked on Track {track}")
+            return True
+        self.log(f"[AUTO] drop WARN — track {track} reads {car_still} "
+                 f"(expected {expected_car})")
+        return False
+
     def _autonomous_loop(self, pickup_order):
         SPEED = 50
         try:
@@ -435,19 +547,10 @@ class TrainController:
                 self.io.route_to_track(track)
                 time.sleep(0.6)
 
-                # Reverse into the siding to couple the car. Use rocking
-                # retry so a finicky coupler can be re-seated automatically.
-                self.log(f"[AUTO] reversing into Track {track} (with rocking)")
-                ok = self._wait_track_state_with_rocking(
-                    track, want_car=None, initial_dir="REV",
-                    window_sec=8.0, max_rocks=6, rev_speed=SPEED)
+                # Pickup: REV into siding to couple, then FWD to pull car out
+                ok = self._pickup_from_track(track, rev_speed=SPEED)
                 if not ok and not self._auto_abort:
                     self.log(f"[AUTO] WARN: Track {track} pickup failed")
-
-                # Continue reverse briefly so the car fully clears the switch zone
-                time.sleep(2.5)
-                self.track.stop()
-                time.sleep(0.4)
 
                 # Mainline straight, then run FWD to entry RFID. The entry
                 # reader confirms the just-picked-up car and serves as the
@@ -526,15 +629,9 @@ class TrainController:
                 self.io.route_to_track(dest)
                 time.sleep(0.6)
 
-                # Reverse into the siding with rocking retry so a stubborn
-                # decouple/park can be re-attempted automatically.
-                self._wait_track_state_with_rocking(
-                    dest, want_car=car, initial_dir="REV",
-                    window_sec=8.0, max_rocks=6, rev_speed=SPEED)
-                # Continue reverse briefly for clean decouple
-                time.sleep(2.0)
-                self.track.stop()
-                time.sleep(0.4)
+                # Drop: REV pushes car against stopper, decoupler engages,
+                # then FWD pulls loco away leaving the car on the RFID.
+                self._drop_to_track(dest, expected_car=car, rev_speed=SPEED)
 
                 self.io.set_all_straight()
                 time.sleep(0.5)
