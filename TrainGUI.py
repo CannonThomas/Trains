@@ -181,26 +181,8 @@ class TrainSorterGUI:
         ttk.Label(title_bar, text="  ·  Pi 5 + RC522 + L298",
                   style="SubHeader.TLabel").pack(side="left", padx=(8, 0))
 
-        # ── STEP 1: Scan ──────────────────────────────────────────────────────
-        f1 = ttk.LabelFrame(self.root, text="① Scan Car Order — drive past entry reader", padding=10)
-        f1.pack(fill="x", **pad)
-
-        btn_row = ttk.Frame(f1)
-        btn_row.pack(fill="x")
-        ttk.Button(btn_row, text="▶  Start Scan", style="Go.TButton",
-                   command=self._start_scan).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="■  Stop Scan", style="Stop.TButton",
-                   command=self._stop_scan).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="✖  Clear", style="Warn.TButton",
-                   command=self._clear_consist).pack(side="left", padx=4)
-
-        ttk.Label(f1, text="Consist (front → back):").pack(anchor="w", pady=(6, 0))
-        self._consist_frame = ttk.Frame(f1)
-        self._consist_frame.pack(fill="x")
-        self._refresh_consist_display()
-
-        # ── STEP 2: Assign Tracks ─────────────────────────────────────────────
-        f2 = ttk.LabelFrame(self.root, text="② Assign Destination Tracks", padding=10)
+        # ── Assign Destination Tracks ─────────────────────────────────────────
+        f2 = ttk.LabelFrame(self.root, text="① Assign Destination Tracks", padding=10)
         f2.pack(fill="x", **pad)
 
         self._dest_inner = None
@@ -208,32 +190,9 @@ class TrainSorterGUI:
         self._dest_outer = f2
         self._rebuild_dest_panel()
 
-        # ── STEP 3: Sort ──────────────────────────────────────────────────────
-        f3 = ttk.LabelFrame(self.root, text="③ Sort", padding=10)
-        f3.pack(fill="x", **pad)
-
-        status_lbl = tk.Label(
-            f3, textvariable=self._status_var,
-            anchor="w", padx=10, pady=8,
-            wraplength=900, justify="left",
-            bg=BG_CARD, fg=ACCENT_GOLD,
-            relief="flat", borderwidth=0,
-            font=("Helvetica", 11, "bold"))
-        status_lbl.pack(fill="x", pady=(0, 6))
-
-        ttk.Label(f3, textvariable=self._next_car_var,
-                  style="Muted.TLabel").pack(anchor="w")
-
-        sort_btns = ttk.Frame(f3)
-        sort_btns.pack(fill="x", pady=8)
-        ttk.Button(sort_btns, text="🔀  Fire Switch & Wait", style="Go.TButton",
-                   command=self._fire_switch).pack(side="left", padx=4)
-        ttk.Button(sort_btns, text="✓  Manual Confirm Drop",
-                   command=self.controller.manual_confirm_drop).pack(side="left", padx=4)
-        ttk.Button(sort_btns, text="⏭  Skip Car",
-                   command=self._skip_car).pack(side="left", padx=4)
-        ttk.Button(sort_btns, text="↺  Reset All", style="Stop.TButton",
-                   command=self._reset).pack(side="right", padx=4)
+        # Hidden consist frame — kept so existing dynamic refresh code works
+        # (Live monitor / autonomous still call _refresh_consist_display.)
+        self._consist_frame = ttk.Frame(self.root)
 
         # ── Autonomous ────────────────────────────────────────────────────────
         f_auto = ttk.LabelFrame(self.root, text="🤖  Autonomous Run", padding=10)
@@ -252,9 +211,21 @@ class TrainSorterGUI:
                    command=self.controller.abort_autonomous
                    ).pack(side="left", padx=4)
 
-        ttk.Label(auto_row, text="👁 Live Track Monitor: ON",
+        ttk.Button(auto_row, text="↺  Reset All", style="Stop.TButton",
+                   command=self._reset).pack(side="right", padx=4)
+        ttk.Label(auto_row, text="👁 Monitor: ON",
                   foreground=ACCENT_GREEN,
-                  font=("Helvetica", 10, "bold")).pack(side="right", padx=4)
+                  font=("Helvetica", 10, "bold")).pack(side="right", padx=8)
+
+        # Status banner driven by controller._set_status
+        status_lbl = tk.Label(
+            f_auto, textvariable=self._status_var,
+            anchor="w", padx=10, pady=8,
+            wraplength=900, justify="left",
+            bg=BG_CARD, fg=ACCENT_GOLD,
+            relief="flat", borderwidth=0,
+            font=("Helvetica", 11, "bold"))
+        status_lbl.pack(fill="x", pady=(8, 0))
 
         # ── Track Status ──────────────────────────────────────────────────────
         f4 = ttk.LabelFrame(self.root, text="🚉  Track Status", padding=10)
