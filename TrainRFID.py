@@ -339,10 +339,22 @@ class TrainRFID:
 
     def identify_car(self, uid: str):
         uid_upper = uid.upper()
+        # Match against the loco first
+        loco_uid = getattr(train_config, "LOCO_UID", "")
+        if loco_uid and uid_upper == loco_uid.upper():
+            return getattr(train_config, "LOCO_NAME", "Loco")
         for name, info in train_config.CAR_ROSTER.items():
             if info["rfid"].upper() == uid_upper:
                 return name
         return None
+
+    def is_loco(self, name_or_uid: str) -> bool:
+        if not name_or_uid:
+            return False
+        loco_name = getattr(train_config, "LOCO_NAME", "Loco")
+        loco_uid  = getattr(train_config, "LOCO_UID", "")
+        return (name_or_uid == loco_name or
+                name_or_uid.upper() == loco_uid.upper())
 
     def get_default_track(self, uid: str):
         name = self.identify_car(uid)

@@ -50,6 +50,11 @@ SWITCH_PULSE_SEC    = 0.250   # 250 ms solenoid impulse
 ENTRY_READER_IDX  = 0
 TRACK_READER_IDX  = {1: 1, 2: 2, 3: 3}   # track number → RFID reader index
 
+# UID of the locomotive itself (not a car). Detected at entry RFID; not
+# counted as a car in consists or destinations.
+LOCO_NAME = "Loco"
+LOCO_UID  = "B2D21710"
+
 # ── SPI bit-bang pins (shared by all 4 readers) ───────────────────────────────
 SPI_MOSI = 10   # Pin 19
 SPI_MISO = 9    # Pin 21

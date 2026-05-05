@@ -108,6 +108,12 @@ class TrainController:
                 now = time.time()
                 if uid != last_uid or (now - last_time) > DEBOUNCE:
                     car = self.rfid.identify_car(uid)
+                    if car and self.rfid.is_loco(car):
+                        # Skip loco — it's not a car
+                        last_uid = uid
+                        last_time = now
+                        time.sleep(0.05)
+                        continue
                     if car and car not in self.car_order:
                         self.car_order.append(car)
                         self.log(f"[SCAN] Detected {car} (position {len(self.car_order)})")
@@ -493,7 +499,8 @@ class TrainController:
                     train_config.ENTRY_READER_IDX, timeout_sec=0.20)
                 if uid:
                     car = self.rfid.identify_car(uid)
-                    if car and car not in seen:
+                    # Skip the locomotive itself — it's not part of the consist
+                    if car and not self.rfid.is_loco(car) and car not in seen:
                         seen.add(car)
                         self.car_order.append(car)
                         self.log(f"[AUTO] consist {len(self.car_order)}: {car}")

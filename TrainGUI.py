@@ -200,13 +200,19 @@ class TrainSorterGUI:
 
         auto_row = ttk.Frame(f_auto)
         auto_row.pack(fill="x")
-        ttk.Label(auto_row, text="Pickup order (e.g. 1,2,3):",
+        ttk.Label(auto_row, text="Pickup order:",
                   font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 6))
-        self._pickup_order_var = tk.StringVar(value="1,2,3")
-        ttk.Entry(auto_row, textvariable=self._pickup_order_var,
-                  width=10).pack(side="left", padx=4)
+
+        # Three dropdowns for pickup order — each chooses a track 1/2/3
+        self._pickup_vars = [tk.IntVar(value=1), tk.IntVar(value=2), tk.IntVar(value=3)]
+        for i, var in enumerate(self._pickup_vars):
+            ttk.Label(auto_row, text=f"{i+1}.",
+                      style="Muted.TLabel").pack(side="left", padx=(8, 2))
+            ttk.Combobox(auto_row, textvariable=var, values=[1, 2, 3],
+                         state="readonly", width=4).pack(side="left", padx=2)
+
         ttk.Button(auto_row, text="▶  Start Autonomous", style="Go.TButton",
-                   command=self._start_autonomous).pack(side="left", padx=8)
+                   command=self._start_autonomous).pack(side="left", padx=12)
         ttk.Button(auto_row, text="■  Abort", style="Stop.TButton",
                    command=self.controller.abort_autonomous
                    ).pack(side="left", padx=4)
@@ -538,10 +544,13 @@ class TrainSorterGUI:
 
     def _start_autonomous(self):
         try:
-            order = [int(x.strip()) for x in self._pickup_order_var.get().split(",") if x.strip()]
-        except ValueError:
-            self.log("[AUTO] invalid pickup order — use comma-separated track numbers")
+            order = [int(v.get()) for v in self._pickup_vars]
+        except (ValueError, tk.TclError):
+            self.log("[AUTO] invalid pickup order")
             return
+        # Warn if duplicates — same track picked more than once
+        if len(set(order)) != len(order):
+            self.log(f"[AUTO] WARN: duplicate tracks in pickup order {order}")
         self.controller.start_autonomous(order)
 
     def _toggle_mock(self):
