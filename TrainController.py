@@ -425,70 +425,50 @@ class TrainController:
     RFID_DEBOUNCE_COUNT = 4
 
     def _pickup_from_track(self, track, rev_speed=50, fwd_speed=40):
-        """Couple to a stationary car at the end of `track` and pull it out.
+        """Couple to a stationary car at the end of `track` by rocking the
+        loco REV/FWD a fixed number of times. After all rocks complete, the
+        caller drives FWD to the entry RFID to confirm the pickup.
 
-        Physics: car sits on stopper at the far end of the siding (also where
-        the track-end RFID is). Loco enters siding by reversing, contacts car,
-        then must go FORWARD to pull car out and off the RFID.
-
-        Strategy: rock REV ↔ FWD up to 6 times. Each phase polls the track-end
-        RFID continuously. RFID reads are DEBOUNCED — we require several
-        consecutive empty reads before accepting "car gone" so a flaky reader
-        can't cause a false positive.
+        We don't try to detect the empty state here — the RFID at the stopper
+        is too unreliable mid-rock. Verification happens at the entry RFID
+        on the way back to the loop.
         """
-        reader_idx = train_config.TRACK_READER_IDX[track]
-        REV_PHASE_SEC = 4.0
-        FWD_PHASE_SEC = 2.5
+        REV_PHASE_SEC = 3.0
+        FWD_PHASE_SEC = 1.5
         MAX_ROCKS     = 6
-        DEBOUNCE      = self.RFID_DEBOUNCE_COUNT
-
-        def poll_for_empty(duration):
-            """Poll for `duration` sec. Returns True after DEBOUNCE consecutive
-            empty reads — guards against transient RFID dropouts."""
-            end = time.time() + duration
-            empty_streak = 0
-            while time.time() < end and not self._auto_abort:
-                uid = self.rfid.scan_reader(reader_idx, timeout_sec=0.15)
-                car = self.rfid.identify_car(uid) if uid else None
-                # Update GUI live (use raw single-read state for visual feedback)
-                self.track_contents[track] = car
-                if self.on_drop_confirmed:
-                    self.on_drop_confirmed(car, track)
-                # Debounced "empty" decision
-                if car is None:
-                    empty_streak += 1
-                    if empty_streak >= DEBOUNCE:
-                        return True
-                else:
-                    empty_streak = 0
-                time.sleep(0.05)
-            return False
 
         for rock in range(1, MAX_ROCKS + 1):
             if self._auto_abort:
+                self.track.stop()
                 return False
 
-            # REV phase
-            self.log(f"[AUTO] pickup rock {rock}/{MAX_ROCKS} → REV into Track {track}")
+            # REV phase — push into siding, contact car
+            self.log(f"[AUTO] pickup rock {rock}/{MAX_ROCKS} → REV "
+                     f"({REV_PHASE_SEC}s)")
             self.track.set_direction("REV")
             self.track.set_speed(rev_speed)
-            if poll_for_empty(REV_PHASE_SEC):
-                self.track.stop()
-                self.log(f"[AUTO] pickup OK during REV phase {rock} (debounced)")
-                return True
+            t_end = time.time() + REV_PHASE_SEC
+            while time.time() < t_end and not self._auto_abort:
+                time.sleep(0.05)
 
-            # FWD phase
-            self.log(f"[AUTO] pickup rock {rock}/{MAX_ROCKS} → FWD to extract")
+            if self._auto_abort:
+                self.track.stop()
+                return False
+
+            # FWD phase — try to seat coupler / pull car
+            self.log(f"[AUTO] pickup rock {rock}/{MAX_ROCKS} → FWD "
+                     f"({FWD_PHASE_SEC}s)")
             self.track.set_direction("FWD")
             self.track.set_speed(fwd_speed)
-            if poll_for_empty(FWD_PHASE_SEC):
-                self.track.stop()
-                self.log(f"[AUTO] pickup OK during FWD phase {rock} (debounced)")
-                return True
+            t_end = time.time() + FWD_PHASE_SEC
+            while time.time() < t_end and not self._auto_abort:
+                time.sleep(0.05)
 
-        self.log(f"[AUTO] all {MAX_ROCKS} rocks failed on Track {track}")
-        self.track.stop()
-        return False
+        # All rocks done — leave loco moving FWD so caller's "drive to entry"
+        # picks up smoothly without an extra direction change.
+        self.log(f"[AUTO] {MAX_ROCKS} rocks complete on Track {track}; "
+                 f"continuing FWD to confirm at entry RFID")
+        return True
 
     def _drop_to_track(self, track, expected_car, rev_speed=50, fwd_speed=40):
         """Push `expected_car` (the car at the back of the train) onto the
