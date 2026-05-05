@@ -28,9 +28,9 @@ CAR_COLORS = {
 
 # Outline color for each car — distinguishes cars that share a body color
 CAR_OUTLINES = {
-    "Santa Fe":   "#ffffff",   # white outline
+    "Santa Fe":   "#f1c40f",   # yellow outline
     "Lackawanna": "#ffffff",   # white outline
-    "Triangle":   "#f1c40f",   # yellow outline
+    "Triangle":   "#ffffff",   # white outline
 }
 
 # Unicode glyph for each car so it's recognisable beyond color alone

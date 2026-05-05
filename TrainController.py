@@ -349,71 +349,68 @@ class TrainController:
         return False
 
     def _autonomous_loop(self, pickup_order):
+        SPEED = 50
         try:
-            self._set_status("AUTO: starting pickup phase")
             self.io.set_all_straight()
             time.sleep(0.5)
 
-            picked_up = []  # cars picked up, in pickup order (front of train = first)
-
-            # ── Phase 1: PICKUP ───────────────────────────────────────────
-            for track in pickup_order:
+            # ── Phase 1: PICKUP — loco starts in loop, reverses to grab cars ──
+            for i, track in enumerate(pickup_order):
                 if self._auto_abort:
                     break
                 car_at_track = self.track_contents.get(track)
-                self._set_status(f"AUTO: picking up Track {track}"
-                                 + (f" ({car_at_track})" if car_at_track else ""))
+                self._set_status(
+                    f"AUTO ① Pickup {i+1}/{len(pickup_order)} → Track {track}"
+                    + (f" ({car_at_track})" if car_at_track else ""))
 
-                # 1. Drive FWD until entry RFID hit
-                self.log(f"[AUTO] driving FWD to entry reader")
-                self._drive_until_rfid(train_config.ENTRY_READER_IDX,
-                                       "FWD", speed=50, timeout=30)
-                self.track.stop()
-                time.sleep(0.5)
-
-                if self._auto_abort:
-                    break
-
-                # 2. Set switches for the target track
+                # Set switches BEFORE reversing
+                self.log(f"[AUTO] switches → Track {track}")
                 self.io.route_to_track(track)
-                time.sleep(0.5)
+                time.sleep(0.6)
 
-                # 3. Reverse to back into the siding
+                # Reverse into the siding to couple the car
                 self.log(f"[AUTO] reversing into Track {track}")
-                self._set_status(f"AUTO: reversing into Track {track}")
-                # Wait for the track-end RFID to go empty (car coupled and moved)
                 self.track.set_direction("REV")
-                self.track.set_speed(50)
+                self.track.set_speed(SPEED)
+                # Wait until that track-end RFID goes EMPTY (car coupled & pulled)
                 ok = self._wait_track_state(track, want_car=None, timeout=30)
                 if not ok and not self._auto_abort:
-                    self.log(f"[AUTO] WARN: didn't see Track {track} go empty")
+                    self.log(f"[AUTO] WARN: Track {track} didn't go empty")
 
-                # 4. Continue reverse briefly so car clears the switch zone
+                # Continue reverse briefly so the car fully clears the switch zone
                 time.sleep(2.5)
                 self.track.stop()
-                time.sleep(0.5)
+                time.sleep(0.4)
 
-                if car_at_track:
-                    picked_up.append(car_at_track)
-
-                # 5. All switches straight before continuing
+                # Mainline straight before next move
                 self.io.set_all_straight()
                 time.sleep(0.5)
+
+                # Between pickups: forward back to the loop area for next pass
+                if i < len(pickup_order) - 1 and not self._auto_abort:
+                    self._set_status("AUTO: returning to loop for next pickup")
+                    self._drive_until_rfid(train_config.ENTRY_READER_IDX,
+                                           "FWD", speed=SPEED, timeout=30)
+                    time.sleep(1.0)
+                    self.track.stop()
+                    time.sleep(0.4)
 
             if self._auto_abort:
                 self.track.stop()
                 self._set_status("AUTO: aborted")
                 return
 
-            # ── Phase 2: SAVE consist via entry RFID scan ─────────────────
-            # Drive forward through entry; the cars in tow will be detected
-            # in front→back order, which is reverse of pickup order
-            self._set_status("AUTO: scanning consist past entry reader")
+            empties = [t for t in pickup_order if not self.track_contents.get(t)]
+            self.log(f"[AUTO] picked-up tracks now empty: {empties}")
+
+            # ── Phase 2: FORWARD past entry RFID — scan consist order ─────
+            self._set_status("AUTO ② Forward — scanning consist at entry RFID")
             self.car_order = []
             seen = set()
+            target = len(pickup_order)
             self.track.set_direction("FWD")
-            self.track.set_speed(50)
-            scan_deadline = time.time() + 25
+            self.track.set_speed(SPEED)
+            scan_deadline = time.time() + 30
             while time.time() < scan_deadline and not self._auto_abort:
                 uid = self.rfid.scan_reader(
                     train_config.ENTRY_READER_IDX, timeout_sec=0.20)
@@ -422,61 +419,80 @@ class TrainController:
                     if car and car not in seen:
                         seen.add(car)
                         self.car_order.append(car)
-                        self.log(f"[AUTO] scanned consist position "
-                                 f"{len(self.car_order)}: {car}")
+                        self.log(f"[AUTO] consist {len(self.car_order)}: {car}")
                         if self.on_car_scanned:
                             self.on_car_scanned(car)
-                        if len(seen) >= len(picked_up):
-                            time.sleep(0.5)
+                        # 3rd (last) car detected → reverse to start sorting
+                        if len(seen) >= target:
+                            time.sleep(1.5)  # let last car clear past entry
                             break
                 time.sleep(0.05)
             self.track.stop()
             time.sleep(0.5)
 
-            # ── Phase 3: SORT each car to its destination ────────────────
+            # ── Phase 3: SORT — reverse, drop each car at destination ─────
             while self.car_order and not self._auto_abort:
-                car = self.car_order[-1]  # back of train drops first
-                track = self.car_destinations.get(car)
-                if not track:
+                car = self.car_order[-1]   # back of train drops first
+                dest = self.car_destinations.get(car)
+                if not dest:
                     self.log(f"[AUTO] no destination for {car}, skipping")
                     self.car_order.pop()
                     continue
 
-                self._set_status(f"AUTO: dropping {car} at Track {track}")
-                self.io.route_to_track(track)
-                time.sleep(0.5)
+                self._set_status(f"AUTO ③ Drop {car} → Track {dest}")
+                self.io.route_to_track(dest)
+                time.sleep(0.6)
 
-                # Reverse until that track-end RFID sees this car
                 self.track.set_direction("REV")
-                self.track.set_speed(50)
-                ok = self._wait_track_state(track, want_car=car, timeout=30)
-                # Continue back briefly to ensure car is past decoupler
+                self.track.set_speed(SPEED)
+                # Wait for that track-end RFID to confirm THIS car is parked
+                self._wait_track_state(dest, want_car=car, timeout=30)
+                # Continue reverse briefly for clean decouple
                 time.sleep(2.0)
                 self.track.stop()
-                time.sleep(0.5)
+                time.sleep(0.4)
 
                 self.io.set_all_straight()
                 time.sleep(0.5)
 
-                # Forward to entry, ready for next drop
-                if self.car_order and len(self.car_order) > 1:
-                    self._drive_until_rfid(train_config.ENTRY_READER_IDX,
-                                           "FWD", speed=50, timeout=30)
-                    self.track.stop()
-                    time.sleep(0.5)
-
+                # Drop car from consist
                 if car in self.car_order:
                     self.car_order.remove(car)
                 if self.on_drop_confirmed:
-                    self.on_drop_confirmed(car, track)
+                    self.on_drop_confirmed(car, dest)
 
-            # ── Phase 4: Final return to loop ────────────────────────────
-            if not self._auto_abort:
-                self._set_status("AUTO: returning to loop")
-                self._drive_until_rfid(train_config.ENTRY_READER_IDX,
-                                       "FWD", speed=50, timeout=30)
+                # If more cars remain, forward to entry RFID to re-scan / reposition
+                if self.car_order and not self._auto_abort:
+                    self._drive_until_rfid(train_config.ENTRY_READER_IDX,
+                                           "FWD", speed=SPEED, timeout=30)
+                    time.sleep(1.0)
+                    self.track.stop()
+                    time.sleep(0.4)
+
+            if self._auto_abort:
                 self.track.stop()
-                self._set_status("AUTO: complete — all cars sorted")
+                self._set_status("AUTO: aborted")
+                return
+
+            # ── Phase 4: DONE — forward, hit entry RFID twice with all full ──
+            self._set_status("AUTO ④ Finish — looping past entry RFID")
+            all_full = lambda: all(self.track_contents.get(t) for t in (1, 2, 3))
+            self.track.set_direction("FWD")
+            self.track.set_speed(SPEED)
+            hits = 0
+            deadline = time.time() + 60
+            while hits < 2 and time.time() < deadline and not self._auto_abort:
+                if self._drive_until_rfid(train_config.ENTRY_READER_IDX,
+                                          "FWD", speed=SPEED, timeout=30):
+                    hits += 1
+                    self.log(f"[AUTO] entry pass {hits}/2  all_full={all_full()}")
+                    time.sleep(1.5)  # let loco coast clear before next pass
+            self.track.stop()
+            if all_full() and hits >= 2:
+                self._set_status("AUTO ✓ Complete — all sorted, loco parked in loop")
+            else:
+                self._set_status(f"AUTO finished — entry passes={hits}, "
+                                 f"all_full={all_full()}")
 
         except Exception as e:
             self.log(f"[AUTO] error: {e}")
