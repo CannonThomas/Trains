@@ -606,7 +606,7 @@ class TrainController:
         return False
 
     def _autonomous_loop(self, pickup_order):
-        FWD_SPEED = 50    # forward speed
+        FWD_SPEED = 60    # forward speed
         REV_SPEED = 40    # gentle reverse so cars don't fly off track
         SPEED = FWD_SPEED  # legacy alias for FWD-only contexts
         LOCO  = train_config.LOCO_NAME
