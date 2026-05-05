@@ -588,7 +588,9 @@ class TrainController:
         return False
 
     def _autonomous_loop(self, pickup_order):
-        SPEED = 50
+        FWD_SPEED = 50    # forward speed
+        REV_SPEED = 40    # gentle reverse so cars don't fly off track
+        SPEED = FWD_SPEED  # legacy alias for FWD-only contexts
         LOCO  = train_config.LOCO_NAME
         # Per-track REV durations on pickup
         PICKUP_REV_SEC = {1: 8.0, 2: 10.0, 3: 12.0}
@@ -631,7 +633,7 @@ class TrainController:
                 # exits the moment the track-end RFID confirms empty — and leaves
                 # the loco running FWD so the next step can continue smoothly.
                 self._pickup_from_track(track, rev_seconds=rev_sec,
-                                        rev_speed=SPEED, fwd_speed=SPEED)
+                                        rev_speed=REV_SPEED, fwd_speed=FWD_SPEED)
                 if self._auto_abort:
                     break
                 if car_at_track and car_at_track not in picked_up_cars:
@@ -669,6 +671,33 @@ class TrainController:
                 if self.on_car_scanned:
                     self.on_car_scanned(c)
 
+            # ── 2.5. PICKUP VICTORY LAP — loop around with all 3 cars ─────
+            # After all 3 picked up, do one full lap of the layout. The lap
+            # ends only when entry RFID re-confirms LOCO + all 3 cars passing,
+            # proving the whole consist is still coupled before drops begin.
+            if not self._auto_abort:
+                self._set_status("AUTO 🏁 Pickup victory lap (all 3 cars in tow)")
+                self.log("[AUTO] starting pickup victory lap")
+                # Coast a bit so we're well past entry before scanning re-arrival
+                self.track.set_direction("FWD")
+                self.track.set_speed(FWD_SPEED)
+                time.sleep(2.5)
+
+                # Wait for the WHOLE consist (loco + every picked-up car) to
+                # pass entry RFID again on the lap.
+                expected_lap = [LOCO] + list(picked_up_cars)
+                self.log(f"[AUTO] victory lap — waiting for: {expected_lap}")
+                seen = self._drive_fwd_until_tags_seen(
+                    expected_lap, speed=FWD_SPEED, timeout=120)
+                missing = [t for t in expected_lap if t not in seen]
+                if missing:
+                    self.log(f"[AUTO] WARN: victory lap missing: {missing}")
+                else:
+                    self.log("[AUTO] pickup victory lap ✓ — all "
+                             f"{len(expected_lap)} tags re-confirmed")
+                # _drive_fwd_until_tags_seen already stopped the loco
+                time.sleep(0.5)
+
             # ── 3. SORT each car to its destination ───────────────────────
             while self.car_order and not self._auto_abort:
                 car  = self.car_order[-1]   # back of train drops first
@@ -684,7 +713,8 @@ class TrainController:
 
                 # Drop: REV until track-end RFID shows expected car,
                 # decouple, FWD away. Track must end up FULL with this car.
-                self._drop_to_track(dest, expected_car=car, rev_speed=SPEED)
+                self._drop_to_track(dest, expected_car=car,
+                                    rev_speed=REV_SPEED, fwd_speed=FWD_SPEED)
                 if self._auto_abort:
                     break
 
